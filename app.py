@@ -152,7 +152,11 @@ if page == "Recommandations stratégiques":
     render_strategic_recommendations_page(nom, iqvia, pch)
     st.stop()
 
+st.markdown("""
+<style>
+
 @media (max-width: 768px) {
+
   .block-container {
     padding: 0.8rem 0.7rem !important;
   }
@@ -191,6 +195,9 @@ if page == "Recommandations stratégiques":
     width: 100% !important;
   }
 }
+
+</style>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### 🔎 Recherche intelligente")
