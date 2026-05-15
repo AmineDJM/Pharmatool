@@ -5,7 +5,6 @@ from market_engine import load_prepared_data
 from market_analysis_page import render_market_analysis_page
 from strategic_recommendations import render_strategic_recommendations_page
 
-configure_page()
 apply_theme()
 
 
