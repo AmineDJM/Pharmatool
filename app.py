@@ -152,16 +152,45 @@ if page == "Recommandations stratégiques":
     render_strategic_recommendations_page(nom, iqvia, pch)
     st.stop()
 
-st.markdown(
-    """
-    <div class="hero">
-      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.4 strategic-recommendations</div>
-      <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
-      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, sélection DCI contrôlée par la Nomenclature, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+@media (max-width: 768px) {
+  .block-container {
+    padding: 0.8rem 0.7rem !important;
+  }
+
+  div[data-testid="stHorizontalBlock"] {
+    flex-direction: column !important;
+  }
+
+  div[data-testid="column"] {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+
+  .stMetric {
+    width: 100% !important;
+  }
+
+  h1 {
+    font-size: 1.8rem !important;
+    line-height: 2.1rem !important;
+  }
+
+  h2, h3 {
+    font-size: 1.2rem !important;
+  }
+
+  .stDataFrame {
+    overflow-x: auto !important;
+  }
+
+  section[data-testid="stSidebar"] {
+    width: 100% !important;
+  }
+
+  button {
+    width: 100% !important;
+  }
+}
 
 with st.sidebar:
     st.markdown("### 🔎 Recherche intelligente")
