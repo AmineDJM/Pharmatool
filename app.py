@@ -21,43 +21,6 @@ from market_engine import (
     safe_unique,
 )
 
-
-# App version marker: if you do not see this in Streamlit logs/UI, the deployment is still using an old file.
-APP_VERSION = "v3.1-safe-unique-fix"
-
-def robust_unique(values, limit=1000):
-    """Local safety wrapper to avoid pandas.unique 1D errors in facet dropdowns."""
-    import numpy as np
-    import pandas as pd
-    if values is None:
-        return []
-    try:
-        if isinstance(values, pd.DataFrame):
-            raw = values.to_numpy(dtype=object).ravel().tolist()
-        elif isinstance(values, (pd.Series, pd.Index)):
-            raw = values.to_numpy(dtype=object).ravel().tolist()
-        else:
-            raw = np.asarray(values, dtype=object).ravel().tolist()
-    except Exception:
-        raw = list(values) if isinstance(values, (list, tuple, set)) else [values]
-    flat = []
-    for v in raw:
-        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
-            try:
-                items = np.asarray(v, dtype=object).ravel().tolist()
-            except Exception:
-                items = list(v)
-        else:
-            items = [v]
-        for item in items:
-            txt = str(item).strip()
-            if txt and txt.lower() not in {"nan", "none", "nat"}:
-                flat.append(txt)
-    return sorted(pd.Series(flat, dtype="object").drop_duplicates().tolist())[:limit]
-
-# Force the app to use the local robust implementation even if Streamlit imports a stale market_engine cache.
-safe_unique = robust_unique
-
 st.set_page_config(
     page_title="Algeria Pharma Market Intelligence",
     page_icon="💊",
@@ -127,11 +90,23 @@ input, textarea {background-color: rgba(15,23,42,.86) !important; color: #F8FAFC
 .stTabs [data-baseweb="tab"] {background: rgba(15,23,42,.60); border-radius: 14px; padding: 10px 16px; border:1px solid rgba(148,163,184,.16);}
 .stDataFrame {border-radius: 18px; overflow:hidden;}
 .small-muted {color:#94A3B8; font-size: 13px;}
-@media (max-width: 768px) {.hero {padding:20px;} .block-container {padding-left: 0.8rem; padding-right: 0.8rem;} }
+@media (max-width: 900px) {
+  .hero {padding:18px; border-radius:22px;}
+  .block-container {padding-left: 0.75rem; padding-right: 0.75rem; padding-top: .8rem;}
+  .metric-card {min-height: 92px; padding: 14px;}
+  .metric-value {font-size: 24px;}
+  [data-testid="stSidebar"] {min-width: 92vw !important; max-width: 92vw !important;}
+}
+@media (max-width: 520px) {
+  .hero h1 {font-size: 30px;}
+  .hero p {font-size: 13px;}
+  .badge {font-size: 10px; padding: 6px 9px;}
+  .stButton>button, .stDownloadButton>button {border-radius: 14px; padding: .65rem .8rem;}
+}
+
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
-st.caption("Build: v3.1-safe-unique-fix")
 
 
 def fmt_money(x):
@@ -162,9 +137,9 @@ except Exception as e:
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">✨ Internal Market Intelligence Engine</div>
+      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.0 pharma-safe-fast</div>
       <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
-      <p>Recherche DCI intelligente, filtres connectés entre eux, matching flou entre Nomenclature, IQVIA ville et réceptions PCH, puis export Excel prêt pour analyse business.</p>
+      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, moteur anti-faux positifs pharma, analyse IQVIA ville / PCH, puis export Excel prêt pour décision business.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -209,11 +184,17 @@ with st.sidebar:
     current_formes = [x for x in current_formes if x in forme_options]
     formes = st.multiselect("Forme / type", forme_options, default=current_formes, key="formes")
 
-    lab_search = st.text_input("Chercher dans les laboratoires", placeholder="ex: Hikma, Sanofi")
     base_kwargs = dict(dosage=dosage, formes=formes, labs=current_labs, statuts=current_statuts, markets=markets)
-    lab_options = [] if universe.empty else filter_options(safe_unique(facet_filter(universe, **base_kwargs, ignore={"lab"})["lab"], 1600), lab_search, 450)
+    lab_options = [] if universe.empty else safe_unique(facet_filter(universe, **base_kwargs, ignore={"lab"})["lab"], 2000)
     current_labs = [x for x in current_labs if x in lab_options]
-    labs = st.multiselect("Laboratoire", lab_options, default=current_labs, key="labs")
+    labs = st.multiselect(
+        "Laboratoire",
+        lab_options,
+        default=current_labs,
+        key="labs",
+        placeholder="Choisir un ou plusieurs laboratoires",
+        help="Liste dynamique issue des produits réellement associés aux filtres actuels. Pas de saisie libre."
+    )
 
     base_kwargs = dict(dosage=dosage, formes=formes, labs=labs, statuts=current_statuts, markets=markets)
     statut_options = [] if universe.empty else [x for x in safe_unique(facet_filter(universe, **base_kwargs, ignore={"statut"})["statut"], 80) if x]

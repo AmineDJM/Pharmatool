@@ -299,25 +299,109 @@ def prep_pch(pch):
     return x
 
 # ---------- 7) SMART MATCHING ----------
+# V4 pharma-safe matching philosophy:
+# 1) DCI matching is STRICT and molecule-aware.
+# 2) Product-label fuzzy matching is only used as fallback, never as the first decision layer.
+# 3) Similar suffixes such as -tegravir must NOT create false positives.
+#    Example: raltegravir must not return dolutegravir / bictegravir.
+
+MOLECULE_CONFUSION_BLACKLIST = {
+    'RALTEGRAVIR': {'DOLUTEGRAVIR', 'BICTEGRAVIR', 'ELVITEGRAVIR'},
+    'DOLUTEGRAVIR': {'RALTEGRAVIR', 'BICTEGRAVIR', 'ELVITEGRAVIR'},
+    'BICTEGRAVIR': {'RALTEGRAVIR', 'DOLUTEGRAVIR', 'ELVITEGRAVIR'},
+    'ELVITEGRAVIR': {'RALTEGRAVIR', 'DOLUTEGRAVIR', 'BICTEGRAVIR'},
+}
+
+MOLECULE_SUFFIXES_REQUIRING_EXACT_TOKEN = (
+    'TEGRAVIR', 'VIR', 'MAB', 'TINIB', 'STATIN', 'PRIL', 'SARTAN', 'OLOL', 'CAINE', 'AZOLE', 'CYCLINE'
+)
+
+def query_molecule_tokens(query_dci):
+    q = norm_text(query_dci)
+    return [t for t in tokens(q) if len(t) >= 3]
+
+
+def _regex_word_token(tok):
+    tok = re.escape(norm_text(tok))
+    return rf'(?<![A-Z0-9]){tok}(?![A-Z0-9])'
+
+
+def _contains_all_query_tokens_series(series_norm, query_dci):
+    qtokens = query_molecule_tokens(query_dci)
+    if not qtokens:
+        return pd.Series(False, index=series_norm.index)
+    mask = pd.Series(True, index=series_norm.index)
+    for tok in qtokens:
+        mask &= series_norm.fillna('').astype(str).str.contains(_regex_word_token(tok), regex=True, na=False)
+    return mask
+
+
+def _candidate_tokens(candidate):
+    return set(t for t in tokens(candidate) if len(t) >= 3)
+
+
+def _is_blacklisted_molecule_pair(query_dci, candidate_text):
+    qt = set(query_molecule_tokens(query_dci))
+    ct = _candidate_tokens(candidate_text)
+    for q in qt:
+        if q in MOLECULE_CONFUSION_BLACKLIST and (ct & MOLECULE_CONFUSION_BLACKLIST[q]):
+            return True
+    return False
+
+
+def _requires_exact_token(query_dci):
+    qts = query_molecule_tokens(query_dci)
+    if not qts:
+        return True
+    # Single molecule-like queries are dangerous for partial fuzzy matching.
+    # Raltegravir vs dolutegravir is the exact bug this prevents.
+    if len(qts) == 1 and any(qts[0].endswith(suf) for suf in MOLECULE_SUFFIXES_REQUIRING_EXACT_TOKEN):
+        return True
+    return False
+
+
 def dci_match_score(query_dci, candidate):
+    """Strict DCI-vs-DCI score. Returns 0-100.
+    Exact/token containment is privileged. Fuzzy is only fallback for typos.
+    """
     q = norm_text(query_dci); c = norm_text(candidate)
-    if not q or not c: return 0
-    if q == c: return 100
-    if q in c or c in q: return 96
-    qt, ct = set(tokens(q)), set(tokens(c))
-    token_score = 0
-    if qt and ct:
-        inter = len(qt & ct); union = len(qt | ct)
-        token_score = 100 * inter / union
-    return max(fuzz.WRatio(q, c), fuzz.token_set_ratio(q, c), token_score)
+    if not q or not c:
+        return 0
+    if q == c:
+        return 100
+    qt, ct = set(query_molecule_tokens(q)), _candidate_tokens(c)
+    if qt and qt.issubset(ct):
+        return 99
+    if _is_blacklisted_molecule_pair(q, c):
+        return 0
+    # If user typed a precise antiviral / mab / etc, do not allow suffix-based partial matches.
+    if _requires_exact_token(q):
+        # Allow only very high whole-token typo correction against each token, not partial substring.
+        best_token = max([fuzz.WRatio(t, q) for t in ct] or [0])
+        return best_token if best_token >= 94 else 0
+    score = max(fuzz.WRatio(q, c), fuzz.token_sort_ratio(q, c), fuzz.token_set_ratio(q, c))
+    return score if score >= 90 else 0
+
 
 def text_product_match_score(query_dci, product_text):
+    """Strict DCI-vs-product-label score for PCH labels.
+    The DCI must appear as a real token first. Fuzzy fallback only corrects typos.
+    """
     q = norm_text(query_dci); t = norm_text(product_text)
-    if not q or not t: return 0
-    if q in t: return 98
-    qt = tokens(q)
-    if qt and all(tok in t for tok in qt): return 94
-    return max(fuzz.partial_ratio(q, t), fuzz.token_set_ratio(q, t))
+    if not q or not t:
+        return 0
+    qt, tt = set(query_molecule_tokens(q)), _candidate_tokens(t)
+    if qt and qt.issubset(tt):
+        return 99
+    if _is_blacklisted_molecule_pair(q, t):
+        return 0
+    if _requires_exact_token(q):
+        best_token = max([fuzz.WRatio(qtok, ttok) for qtok in qt for ttok in tt] or [0])
+        return best_token if best_token >= 95 else 0
+    # Multi-word or less risky fallback: token-level, not partial full-string.
+    best_token = max([fuzz.WRatio(qtok, ttok) for qtok in qt for ttok in tt] or [0])
+    return best_token if best_token >= 92 else 0
+
 
 def apply_filters(df, dosage=None, formes=None, labs=None, statuts=None, source='nom'):
     x = df.copy()
@@ -341,48 +425,66 @@ def apply_filters(df, dosage=None, formes=None, labs=None, statuts=None, source=
     if labs:
         labs_norm = [norm_text(l) for l in labs if str(l).strip()]
         if labs_norm:
-            x['_LAB_SCORE'] = x['LAB_NORM'].map(lambda s: max([fuzz.WRatio(str(s), l) for l in labs_norm] or [0]))
-            x = x[x['_LAB_SCORE'] >= 86]
+            # The lab field comes from a controlled dropdown, so exact normalized match first.
+            lab_set = set(labs_norm)
+            x = x[x['LAB_NORM'].isin(lab_set)]
     if statuts and source == 'nom':
         st = set(norm_text(s) for s in statuts if str(s).strip())
         if st:
             x = x[x['STATUS_NORM'].isin(st)]
     return x
 
-def filter_nomenclature(nom, dci_list, dosage=None, formes=None, labs=None, statuts=None):
+
+def _strict_filter_by_dci_column(df, dci_list, col_norm):
     frames=[]
     for dci in dci_list:
-        tmp = nom.copy()
+        tmp = df.copy()
         tmp['_QUERY_DCI'] = dci
-        tmp['_DCI_SCORE'] = tmp['DCI_NORM'].map(lambda s: dci_match_score(dci, s))
-        tmp = tmp[tmp['_DCI_SCORE'] >= CONFIG['FUZZY_DCI_THRESHOLD']]
-        tmp = apply_filters(tmp, dosage, formes, labs, statuts, source='nom')
+        exact_mask = _contains_all_query_tokens_series(tmp[col_norm], dci)
+        if exact_mask.any():
+            tmp = tmp[exact_mask].copy()
+            tmp['_DCI_SCORE'] = tmp[col_norm].map(lambda s: dci_match_score(dci, s))
+            tmp['_DCI_SCORE'] = tmp['_DCI_SCORE'].replace(0, 99)
+        else:
+            tmp['_DCI_SCORE'] = tmp[col_norm].map(lambda s: dci_match_score(dci, s))
+            tmp = tmp[tmp['_DCI_SCORE'] >= max(CONFIG['FUZZY_DCI_THRESHOLD'], 90)]
         frames.append(tmp)
-    if not frames: return pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
     return pd.concat(frames, ignore_index=True).drop_duplicates()
 
+
+def filter_nomenclature(nom, dci_list, dosage=None, formes=None, labs=None, statuts=None):
+    tmp = _strict_filter_by_dci_column(nom, dci_list, 'DCI_NORM')
+    if tmp.empty:
+        return tmp
+    return apply_filters(tmp, dosage, formes, labs, statuts, source='nom')
+
+
 def filter_iqvia(iqvia, dci_list, dosage=None, formes=None, labs=None):
-    frames=[]
-    for dci in dci_list:
-        tmp = iqvia.copy()
-        tmp['_QUERY_DCI'] = dci
-        tmp['_DCI_SCORE'] = tmp['MOLECULE_NORM'].map(lambda s: dci_match_score(dci, s))
-        tmp = tmp[tmp['_DCI_SCORE'] >= CONFIG['FUZZY_DCI_THRESHOLD']]
-        tmp = apply_filters(tmp, dosage, formes, labs, None, source='iqvia')
-        frames.append(tmp)
-    if not frames: return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True).drop_duplicates()
+    tmp = _strict_filter_by_dci_column(iqvia, dci_list, 'MOLECULE_NORM')
+    if tmp.empty:
+        return tmp
+    return apply_filters(tmp, dosage, formes, labs, None, source='iqvia')
+
 
 def filter_pch(pch, dci_list, dosage=None, formes=None, labs=None):
     frames=[]
     for dci in dci_list:
         tmp = pch.copy()
         tmp['_QUERY_DCI'] = dci
-        tmp['_DCI_SCORE'] = tmp['TEXT_NORM'].map(lambda s: text_product_match_score(dci, s))
-        tmp = tmp[tmp['_DCI_SCORE'] >= CONFIG['FUZZY_TEXT_THRESHOLD']]
+        exact_mask = _contains_all_query_tokens_series(tmp['TEXT_NORM'], dci)
+        if exact_mask.any():
+            tmp = tmp[exact_mask].copy()
+            tmp['_DCI_SCORE'] = tmp['TEXT_NORM'].map(lambda s: text_product_match_score(dci, s))
+            tmp['_DCI_SCORE'] = tmp['_DCI_SCORE'].replace(0, 99)
+        else:
+            tmp['_DCI_SCORE'] = tmp['TEXT_NORM'].map(lambda s: text_product_match_score(dci, s))
+            tmp = tmp[tmp['_DCI_SCORE'] >= 92]
         tmp = apply_filters(tmp, dosage, formes, labs, None, source='pch')
         frames.append(tmp)
-    if not frames: return pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
     return pd.concat(frames, ignore_index=True).drop_duplicates()
 
 # ---------- 8) AGGREGATION / MARKET SHARE ----------
@@ -566,46 +668,34 @@ def load_prepared_data():
 
 
 def safe_unique(values, limit=1000):
-    """Return clean unique string values from a Series/list/Index/DataFrame.
-
-    Streamlit facet callbacks can occasionally pass a one-column DataFrame,
-    a numpy array, or nested array-like values instead of a plain Series.
-    This helper intentionally flattens everything to a 1D Python list before
-    calling pandas.unique, which prevents the pandas 2.x/py3.14 error:
-    `unique() only handles 1-dimensional array-like objects`.
-    """
+    """Robust unique extractor for Series/DataFrame/list/array/scalars."""
     if values is None:
         return []
-
-    # Convert to a flat 1D list, whatever Streamlit/pandas gives us.
-    try:
-        if isinstance(values, pd.DataFrame):
-            raw = values.to_numpy(dtype=object).ravel().tolist()
-        elif isinstance(values, pd.Series):
-            raw = values.to_numpy(dtype=object).ravel().tolist()
-        elif isinstance(values, pd.Index):
-            raw = values.to_numpy(dtype=object).ravel().tolist()
-        else:
-            raw = np.asarray(values, dtype=object).ravel().tolist()
-    except Exception:
-        raw = list(values) if isinstance(values, (list, tuple, set)) else [values]
-
+    if isinstance(values, pd.DataFrame):
+        raw = values.to_numpy().ravel().tolist()
+    elif isinstance(values, pd.Series):
+        raw = values.to_numpy().ravel().tolist()
+    elif isinstance(values, (list, tuple, set, np.ndarray)):
+        raw = np.array(list(values), dtype=object).ravel().tolist()
+    else:
+        raw = [values]
     vals = []
+    seen = set()
     for v in raw:
-        # Flatten accidental nested values such as lists/arrays/Series.
-        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
-            try:
-                nested = np.asarray(v, dtype=object).ravel().tolist()
-            except Exception:
-                nested = list(v)
+        if isinstance(v, (list, tuple, set, np.ndarray)):
+            iterable = np.array(list(v), dtype=object).ravel().tolist()
         else:
-            nested = [v]
-        for item in nested:
-            txt = str(item).strip()
-            if txt and txt.lower() not in {'nan', 'none', 'nat'}:
-                vals.append(txt)
-
-    return sorted(pd.unique(pd.Series(vals, dtype='object')).tolist())[:limit]
+            iterable = [v]
+        for item in iterable:
+            if pd.isna(item):
+                continue
+            sv = str(item).strip()
+            if not sv or sv.lower() in {'nan','none','nat'}:
+                continue
+            if sv not in seen:
+                seen.add(sv)
+                vals.append(sv)
+    return sorted(vals)[:limit]
 
 
 def build_option_universe(dci_text, selected_markets, nom, iqvia, pch):
