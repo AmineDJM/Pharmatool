@@ -21,6 +21,43 @@ from market_engine import (
     safe_unique,
 )
 
+
+# App version marker: if you do not see this in Streamlit logs/UI, the deployment is still using an old file.
+APP_VERSION = "v3.1-safe-unique-fix"
+
+def robust_unique(values, limit=1000):
+    """Local safety wrapper to avoid pandas.unique 1D errors in facet dropdowns."""
+    import numpy as np
+    import pandas as pd
+    if values is None:
+        return []
+    try:
+        if isinstance(values, pd.DataFrame):
+            raw = values.to_numpy(dtype=object).ravel().tolist()
+        elif isinstance(values, (pd.Series, pd.Index)):
+            raw = values.to_numpy(dtype=object).ravel().tolist()
+        else:
+            raw = np.asarray(values, dtype=object).ravel().tolist()
+    except Exception:
+        raw = list(values) if isinstance(values, (list, tuple, set)) else [values]
+    flat = []
+    for v in raw:
+        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
+            try:
+                items = np.asarray(v, dtype=object).ravel().tolist()
+            except Exception:
+                items = list(v)
+        else:
+            items = [v]
+        for item in items:
+            txt = str(item).strip()
+            if txt and txt.lower() not in {"nan", "none", "nat"}:
+                flat.append(txt)
+    return sorted(pd.Series(flat, dtype="object").drop_duplicates().tolist())[:limit]
+
+# Force the app to use the local robust implementation even if Streamlit imports a stale market_engine cache.
+safe_unique = robust_unique
+
 st.set_page_config(
     page_title="Algeria Pharma Market Intelligence",
     page_icon="💊",
@@ -94,6 +131,7 @@ input, textarea {background-color: rgba(15,23,42,.86) !important; color: #F8FAFC
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+st.caption("Build: v3.1-safe-unique-fix")
 
 
 def fmt_money(x):

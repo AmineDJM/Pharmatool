@@ -565,13 +565,47 @@ def load_prepared_data():
     return prep_nomenclature(nom_active, nom_non, nom_ret), prep_iqvia(iqvia_raw), prep_pch(pch_raw)
 
 
-def safe_unique(series, limit=1000):
+def safe_unique(values, limit=1000):
+    """Return clean unique string values from a Series/list/Index/DataFrame.
+
+    Streamlit facet callbacks can occasionally pass a one-column DataFrame,
+    a numpy array, or nested array-like values instead of a plain Series.
+    This helper intentionally flattens everything to a 1D Python list before
+    calling pandas.unique, which prevents the pandas 2.x/py3.14 error:
+    `unique() only handles 1-dimensional array-like objects`.
+    """
+    if values is None:
+        return []
+
+    # Convert to a flat 1D list, whatever Streamlit/pandas gives us.
+    try:
+        if isinstance(values, pd.DataFrame):
+            raw = values.to_numpy(dtype=object).ravel().tolist()
+        elif isinstance(values, pd.Series):
+            raw = values.to_numpy(dtype=object).ravel().tolist()
+        elif isinstance(values, pd.Index):
+            raw = values.to_numpy(dtype=object).ravel().tolist()
+        else:
+            raw = np.asarray(values, dtype=object).ravel().tolist()
+    except Exception:
+        raw = list(values) if isinstance(values, (list, tuple, set)) else [values]
+
     vals = []
-    for v in series.dropna().astype(str).tolist():
-        v = v.strip()
-        if v and v.lower() != 'nan':
-            vals.append(v)
-    return sorted(pd.unique(vals).tolist())[:limit]
+    for v in raw:
+        # Flatten accidental nested values such as lists/arrays/Series.
+        if isinstance(v, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
+            try:
+                nested = np.asarray(v, dtype=object).ravel().tolist()
+            except Exception:
+                nested = list(v)
+        else:
+            nested = [v]
+        for item in nested:
+            txt = str(item).strip()
+            if txt and txt.lower() not in {'nan', 'none', 'nat'}:
+                vals.append(txt)
+
+    return sorted(pd.unique(pd.Series(vals, dtype='object')).tolist())[:limit]
 
 
 def build_option_universe(dci_text, selected_markets, nom, iqvia, pch):
