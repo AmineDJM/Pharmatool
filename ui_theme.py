@@ -348,3 +348,18 @@ def info_card(text: str):
         """,
         unsafe_allow_html=True,
     )
+
+def fmt_money(value, currency="DZD"):
+    try:
+        if value is None:
+            return "-"
+        value = float(value)
+        if abs(value) >= 1_000_000_000:
+            return f"{value/1_000_000_000:,.2f} B {currency}".replace(",", " ")
+        if abs(value) >= 1_000_000:
+            return f"{value/1_000_000:,.2f} M {currency}".replace(",", " ")
+        if abs(value) >= 1_000:
+            return f"{value/1_000:,.2f} K {currency}".replace(",", " ")
+        return f"{value:,.0f} {currency}".replace(",", " ")
+    except Exception:
+        return "-"
