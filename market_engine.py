@@ -662,6 +662,46 @@ def parse_dci_input(dci_input):
     return [str(x).strip() for x in (dci_input or []) if str(x).strip()]
 
 
+# ---------- DCI CONTROLLED OPTIONS FROM NOMENCLATURE ----------
+def get_nomenclature_dci_options(nom, query='', limit=300):
+    """Return controlled DCI options from the nomenclature only.
+    Supports live search for single molecules and fixed combinations.
+    """
+    if nom is None or nom.empty or 'DCI' not in nom.columns:
+        return []
+    vals = safe_unique(nom['DCI'].dropna().astype(str), 20000)
+    q = norm_text(query)
+    if not q:
+        return vals[:limit]
+    ranked = []
+    for v in vals:
+        vn = norm_text(v)
+        if not vn:
+            continue
+        score = 0
+        if vn == q:
+            score = 120
+        elif q in vn:
+            score = 110
+        else:
+            # For controlled dropdown only: tolerant for minor typos, but strict enough
+            # to avoid misleading molecule suggestions such as DOLUTE -> PIDOLATE.
+            score = fuzz.WRatio(q, vn)
+            # If the typed fragment is reasonably long and not contained, require a very strong typo score.
+            if len(q) >= 5 and score < 88:
+                score = 0
+        if score >= 78:
+            ranked.append((score, len(vn), v))
+    ranked = sorted(ranked, key=lambda x: (-x[0], x[1], x[2]))
+    return [v for _,__,v in ranked[:limit]]
+
+def dci_input_to_list(selected_dcis=None, free_text=''):
+    selected = [str(x).strip() for x in (selected_dcis or []) if str(x).strip()]
+    if selected:
+        return selected
+    return parse_dci_input(free_text)
+
+
 def load_prepared_data():
     iqvia_raw, pch_raw, nom_active, nom_non, nom_ret = load_data()
     return prep_nomenclature(nom_active, nom_non, nom_ret), prep_iqvia(iqvia_raw), prep_pch(pch_raw)

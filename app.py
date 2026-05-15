@@ -17,6 +17,8 @@ from market_engine import (
     filter_pch,
     load_prepared_data,
     parse_dci_input,
+    get_nomenclature_dci_options,
+    dci_input_to_list,
     run_market_analysis,
     safe_unique,
 )
@@ -137,9 +139,9 @@ except Exception as e:
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.2 opportunity-tabs</div>
+      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.3 controlled-dci-business-tables</div>
       <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
-      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
+      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, sélection DCI contrôlée par la Nomenclature, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -147,12 +149,23 @@ st.markdown(
 
 with st.sidebar:
     st.markdown("### 🔎 Recherche intelligente")
-    dci_text = st.text_area(
-        "DCI(s)",
-        placeholder="Ex: paracetamol, amoxicilline, cefixime",
-        height=92,
-        help="Tu peux mettre une ou plusieurs DCI, séparées par virgule ou retour ligne.",
+    dci_search = st.text_input(
+        "Chercher une DCI dans la Nomenclature",
+        placeholder="Ex: dolutegravir, raltegravir, paracetamol",
+        help="Tape quelques lettres : la liste proposée vient uniquement de la Nomenclature officielle.",
     )
+    dci_options = get_nomenclature_dci_options(nom, dci_search, limit=350)
+    previous_dcis = st.session_state.get("selected_dcis", [])
+    dci_options = list(dict.fromkeys(list(previous_dcis) + list(dci_options)))
+    selected_dcis = st.multiselect(
+        "DCI(s) sélectionnée(s)",
+        dci_options,
+        default=previous_dcis,
+        key="selected_dcis",
+        placeholder="Choisir une ou plusieurs DCI / associations",
+        help="Sélection contrôlée : tu peux choisir la DCI seule ou les associations présentes dans la Nomenclature.",
+    )
+    dci_text = ", ".join(selected_dcis) if selected_dcis else dci_search
     markets = st.multiselect(
         "Marché analysé",
         ["IQVIA VILLE", "PCH HOSPITALIER"],
@@ -218,7 +231,7 @@ with run_col2:
     run = st.button("🚀 Lancer l’analyse", use_container_width=True, type="primary")
 
 if not dci_text.strip():
-    st.info("Entre une ou plusieurs DCI dans la barre latérale pour activer le moteur.")
+    st.info("Tape une DCI puis sélectionne une ou plusieurs propositions issues de la Nomenclature.")
     st.stop()
 
 if universe.empty:
@@ -232,54 +245,45 @@ c2.markdown(f'<div class="metric-card"><div class="metric-label">Laboratoires</d
 c3.markdown(f'<div class="metric-card"><div class="metric-label">Formes</div><div class="metric-value">{live_intersection["forme"].replace("", pd.NA).dropna().nunique():,}</div><div class="metric-sub">formes associées</div></div>', unsafe_allow_html=True)
 c4.markdown(f'<div class="metric-card"><div class="metric-label">Sources</div><div class="metric-value">{live_intersection["source"].nunique():,}</div><div class="metric-sub">nomenclature / marchés</div></div>', unsafe_allow_html=True)
 
-with st.expander("👁️ Aperçu des lignes associées", expanded=False):
-    nom_preview = live_intersection[live_intersection["source"].eq("NOMENCLATURE")].copy()
-    iqvia_preview = live_intersection[live_intersection["source"].eq("IQVIA VILLE")].copy()
-    pch_preview = live_intersection[live_intersection["source"].eq("PCH HOSPITALIER")].copy()
+# Preview tabs built directly from source tables to avoid losing nomenclature lines through the faceted universe.
+preview_dcis = dci_input_to_list(selected_dcis, dci_search)
+preview_nom = filter_nomenclature(nom, preview_dcis, dosage, formes, labs, statuts) if preview_dcis else pd.DataFrame()
+preview_iqvia = filter_iqvia(iqvia, preview_dcis, dosage, formes, labs) if preview_dcis and "IQVIA VILLE" in markets else pd.DataFrame()
+preview_pch = filter_pch(pch, preview_dcis, dosage, formes, labs) if preview_dcis and "PCH HOSPITALIER" in markets else pd.DataFrame()
 
+with st.expander("👁️ Aperçu des lignes associées", expanded=False):
     t_nom, t_iqvia, t_pch = st.tabs([
-        f"📚 Nomenclature ({len(nom_preview):,})",
-        f"🏙️ IQVIA ville ({len(iqvia_preview):,})",
-        f"🏥 Ventes hospitalières PCH ({len(pch_preview):,})",
+        f"📚 Nomenclature ({len(preview_nom):,})",
+        f"🏙️ IQVIA ville ({len(preview_iqvia):,})",
+        f"🏥 Ventes hospitalières PCH ({len(preview_pch):,})",
     ])
 
-    preview_cols = ["dci", "label", "dosage", "forme", "lab", "statut", "market"]
-
     with t_nom:
-        if nom_preview.empty:
+        if preview_nom.empty:
             st.info("Aucune ligne nomenclature associée aux filtres actuels.")
         else:
-            st.caption("Source affichée ici : uniquement la Nomenclature. Les lignes IQVIA et PCH sont volontairement séparées dans les onglets suivants.")
-            st.dataframe(
-                nom_preview[[c for c in preview_cols if c in nom_preview.columns]].head(500),
-                use_container_width=True,
-                height=360,
-            )
+            st.caption("Source affichée ici : uniquement la Nomenclature. Toutes les lignes liées à la/aux DCI sélectionnée(s) sont affichées.")
+            cols = [c for c in ['_QUERY_DCI','DCI','BRAND','FORME','DOSAGE','CONDITIONNEMENT','LABORATOIRE','STATUT','TYPE','P1','P2','LISTE','SOURCE_NOMENCLATURE'] if c in preview_nom.columns]
+            st.dataframe(preview_nom[cols].head(1000), use_container_width=True, height=390)
 
     with t_iqvia:
-        if iqvia_preview.empty:
+        if preview_iqvia.empty:
             st.info("Aucune ligne IQVIA ville associée aux filtres actuels.")
         else:
             st.caption("Aperçu des lignes marché ville associées aux filtres actuels.")
-            st.dataframe(
-                iqvia_preview[[c for c in preview_cols if c in iqvia_preview.columns]].head(500),
-                use_container_width=True,
-                height=360,
-            )
+            cols = [c for c in ['_QUERY_DCI','MOLECULE','BRAND','PRESENTATION','LABORATOIRE','THERAPEUTIC_CLASS','MARKET_VOLUME','MARKET_VALUE_DZD','MARKET_VALUE_USD'] if c in preview_iqvia.columns]
+            st.dataframe(preview_iqvia[cols].head(1000), use_container_width=True, height=390)
 
     with t_pch:
-        if pch_preview.empty:
+        if preview_pch.empty:
             st.info("Aucune ligne de réceptions / ventes hospitalières PCH associée aux filtres actuels.")
         else:
             st.caption("Aperçu des lignes hospitalières associées aux filtres actuels.")
-            st.dataframe(
-                pch_preview[[c for c in preview_cols if c in pch_preview.columns]].head(500),
-                use_container_width=True,
-                height=360,
-            )
+            cols = [c for c in ['_QUERY_DCI','PRODUCT_FULL','LABORATOIRE','THERAPEUTIC_CLASS','QTE','UNIT_PRICE','DEVISE','MARKET_VALUE_DZD','MARKET_VALUE_USD','DATESTOCKAGE','TYPE_RECEP'] if c in preview_pch.columns]
+            st.dataframe(preview_pch[cols].head(1000), use_container_width=True, height=390)
 
 if run:
-    dci_list = parse_dci_input(dci_text)
+    dci_list = dci_input_to_list(selected_dcis, dci_search)
     with st.spinner("Matching intelligent en cours… agrégation des marchés… génération du fichier Excel…"):
         nom_matches = filter_nomenclature(nom, dci_list, dosage, formes, labs, statuts)
         iqvia_matches = filter_iqvia(iqvia, dci_list, dosage, formes, labs) if "IQVIA VILLE" in markets else pd.DataFrame()
@@ -316,20 +320,32 @@ def clean_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     drop_cols = {"Dossier availability"}
     return df[[c for c in df.columns if c not in drop_cols]].copy()
 
-def clean_market_detail_table(df: pd.DataFrame) -> pd.DataFrame:
+def clean_market_detail_table(df: pd.DataFrame, mode: str = "market") -> pd.DataFrame:
+    """Business-facing market table: no technical score/match/currency/original-value columns.
+    For PCH and IQVIA, always expose Market Value in DZD and USD only.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
-    hidden_keywords = ["match", "score"]
-    hidden_exact = {"Avg_Match_Score", "Dosage_Match_Score", "Average_Price_Per_Box_DZD"}
-    cols = []
-    for c in df.columns:
-        lc = str(c).lower()
-        if c in hidden_exact:
-            continue
-        if any(k in lc for k in hidden_keywords):
-            continue
-        cols.append(c)
-    return df[cols].copy()
+    x = df.copy()
+    rename = {
+        '_QUERY_DCI': 'DCI',
+        'PRODUCT_FULL': 'Product',
+        'LABORATOIRE': 'Laboratory',
+        'SOURCE_MARKET': 'Source market',
+        'Therapeutic_Class': 'Therapeutic class',
+        'Market_Size_Volume': 'Market size in volume',
+        'Market_Size_Value_DZD': 'Market value DZD',
+        'Market_Size_Value_USD': 'Market value USD',
+    }
+    x = x.rename(columns={k:v for k,v in rename.items() if k in x.columns})
+    preferred = [
+        'DCI', 'Product', 'Laboratory', 'Source market', 'Therapeutic class',
+        'Market size in volume', 'Market value DZD', 'Market value USD'
+    ]
+    # Optional clean business columns only if they are already user-facing.
+    extras_allowed = []
+    cols = [c for c in preferred + extras_allowed if c in x.columns]
+    return x[cols].copy()
 
 def clean_nomenclature_table(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -372,8 +388,8 @@ summary_display = clean_summary_table(main)
 market_display = clean_market_detail_table(market_detail)
 hospital_detail = market_detail[market_detail["SOURCE_MARKET"].eq("PCH HOSPITALIER")].copy() if "SOURCE_MARKET" in market_detail.columns else pd.DataFrame()
 ville_detail = market_detail[market_detail["SOURCE_MARKET"].eq("IQVIA VILLE")].copy() if "SOURCE_MARKET" in market_detail.columns else pd.DataFrame()
-hospital_display = clean_market_detail_table(hospital_detail)
-ville_display = clean_market_detail_table(ville_detail)
+hospital_display = clean_market_detail_table(hospital_detail, mode="hospital")
+ville_display = clean_market_detail_table(ville_detail, mode="ville")
 nom_display = clean_nomenclature_table(nom_detail)
 
 # Export the same business-clean version visible in the app.
