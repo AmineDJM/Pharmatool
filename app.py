@@ -137,9 +137,9 @@ except Exception as e:
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.0 pharma-safe-fast</div>
+      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.2 opportunity-tabs</div>
       <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
-      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, moteur anti-faux positifs pharma, analyse IQVIA ville / PCH, puis export Excel prêt pour décision business.</p>
+      <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -232,8 +232,51 @@ c2.markdown(f'<div class="metric-card"><div class="metric-label">Laboratoires</d
 c3.markdown(f'<div class="metric-card"><div class="metric-label">Formes</div><div class="metric-value">{live_intersection["forme"].replace("", pd.NA).dropna().nunique():,}</div><div class="metric-sub">formes associées</div></div>', unsafe_allow_html=True)
 c4.markdown(f'<div class="metric-card"><div class="metric-label">Sources</div><div class="metric-value">{live_intersection["source"].nunique():,}</div><div class="metric-sub">nomenclature / marchés</div></div>', unsafe_allow_html=True)
 
-with st.expander("👁️ Aperçu des candidats détectés", expanded=False):
-    st.dataframe(live_intersection[["source", "dci", "label", "dosage", "forme", "lab", "statut", "market"]].head(300), use_container_width=True, height=360)
+with st.expander("👁️ Aperçu des lignes associées", expanded=False):
+    nom_preview = live_intersection[live_intersection["source"].eq("NOMENCLATURE")].copy()
+    iqvia_preview = live_intersection[live_intersection["source"].eq("IQVIA VILLE")].copy()
+    pch_preview = live_intersection[live_intersection["source"].eq("PCH HOSPITALIER")].copy()
+
+    t_nom, t_iqvia, t_pch = st.tabs([
+        f"📚 Nomenclature ({len(nom_preview):,})",
+        f"🏙️ IQVIA ville ({len(iqvia_preview):,})",
+        f"🏥 Ventes hospitalières PCH ({len(pch_preview):,})",
+    ])
+
+    preview_cols = ["dci", "label", "dosage", "forme", "lab", "statut", "market"]
+
+    with t_nom:
+        if nom_preview.empty:
+            st.info("Aucune ligne nomenclature associée aux filtres actuels.")
+        else:
+            st.caption("Source affichée ici : uniquement la Nomenclature. Les lignes IQVIA et PCH sont volontairement séparées dans les onglets suivants.")
+            st.dataframe(
+                nom_preview[[c for c in preview_cols if c in nom_preview.columns]].head(500),
+                use_container_width=True,
+                height=360,
+            )
+
+    with t_iqvia:
+        if iqvia_preview.empty:
+            st.info("Aucune ligne IQVIA ville associée aux filtres actuels.")
+        else:
+            st.caption("Aperçu des lignes marché ville associées aux filtres actuels.")
+            st.dataframe(
+                iqvia_preview[[c for c in preview_cols if c in iqvia_preview.columns]].head(500),
+                use_container_width=True,
+                height=360,
+            )
+
+    with t_pch:
+        if pch_preview.empty:
+            st.info("Aucune ligne de réceptions / ventes hospitalières PCH associée aux filtres actuels.")
+        else:
+            st.caption("Aperçu des lignes hospitalières associées aux filtres actuels.")
+            st.dataframe(
+                pch_preview[[c for c in preview_cols if c in pch_preview.columns]].head(500),
+                use_container_width=True,
+                height=360,
+            )
 
 if run:
     dci_list = parse_dci_input(dci_text)
@@ -266,37 +309,122 @@ k2.markdown(f'<div class="metric-card"><div class="metric-label">Market value US
 k3.markdown(f'<div class="metric-card"><div class="metric-label">Volume</div><div class="metric-value">{fmt_money(total_vol)}</div><div class="metric-sub">unités / réceptions</div></div>', unsafe_allow_html=True)
 k4.markdown(f'<div class="metric-card"><div class="metric-label">Players</div><div class="metric-value">{players}</div><div class="metric-sub">laboratoires détectés</div></div>', unsafe_allow_html=True)
 
+# Clean display tables: keep business columns, hide technical matching columns.
+def clean_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    drop_cols = {"Dossier availability"}
+    return df[[c for c in df.columns if c not in drop_cols]].copy()
+
+def clean_market_detail_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    hidden_keywords = ["match", "score"]
+    hidden_exact = {"Avg_Match_Score", "Dosage_Match_Score", "Average_Price_Per_Box_DZD"}
+    cols = []
+    for c in df.columns:
+        lc = str(c).lower()
+        if c in hidden_exact:
+            continue
+        if any(k in lc for k in hidden_keywords):
+            continue
+        cols.append(c)
+    return df[cols].copy()
+
+def clean_nomenclature_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    hidden_keywords = ["match", "score"]
+    cols = [c for c in df.columns if not any(k in str(c).lower() for k in hidden_keywords)]
+    return df[cols].copy()
+
+def draw_market_charts(df: pd.DataFrame, title_suffix: str = ""):
+    if df is None or df.empty:
+        st.info("Aucune donnée marché disponible pour ce graphique.")
+        return
+    by_lab = df.groupby(["SOURCE_MARKET", "LABORATOIRE"], dropna=False).agg(
+        Value_DZD=("Market_Size_Value_DZD", "sum"),
+        Volume=("Market_Size_Volume", "sum"),
+    ).reset_index().sort_values("Value_DZD", ascending=False).head(25)
+    fig = px.bar(
+        by_lab,
+        x="LABORATOIRE",
+        y="Value_DZD",
+        color="SOURCE_MARKET",
+        title=f"Top players par valeur marché {title_suffix}",
+    )
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Laboratoire", yaxis_title="Valeur DZD")
+    st.plotly_chart(fig, use_container_width=True)
+
+    c_left, c_right = st.columns(2)
+    with c_left:
+        by_source = df.groupby("SOURCE_MARKET", dropna=False).agg(Value_DZD=("Market_Size_Value_DZD", "sum")).reset_index()
+        fig2 = px.pie(by_source, names="SOURCE_MARKET", values="Value_DZD", title=f"Split par source {title_suffix}")
+        fig2.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig2, use_container_width=True)
+    with c_right:
+        by_product = df.groupby("PRODUCT_FULL", dropna=False).agg(Value_DZD=("Market_Size_Value_DZD", "sum")).reset_index().sort_values("Value_DZD", ascending=False).head(12)
+        fig3 = px.bar(by_product, x="Value_DZD", y="PRODUCT_FULL", orientation="h", title=f"Top produits {title_suffix}")
+        fig3.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Valeur DZD", yaxis_title="Produit")
+        st.plotly_chart(fig3, use_container_width=True)
+
+summary_display = clean_summary_table(main)
+market_display = clean_market_detail_table(market_detail)
+hospital_detail = market_detail[market_detail["SOURCE_MARKET"].eq("PCH HOSPITALIER")].copy() if "SOURCE_MARKET" in market_detail.columns else pd.DataFrame()
+ville_detail = market_detail[market_detail["SOURCE_MARKET"].eq("IQVIA VILLE")].copy() if "SOURCE_MARKET" in market_detail.columns else pd.DataFrame()
+hospital_display = clean_market_detail_table(hospital_detail)
+ville_display = clean_market_detail_table(ville_detail)
+nom_display = clean_nomenclature_table(nom_detail)
+
+# Export the same business-clean version visible in the app.
+excel_bytes_clean = export_excel_bytes(summary_display, market_display, nom_display)
 st.download_button(
     "⬇️ Télécharger l’analyse Excel",
-    data=excel_bytes,
+    data=excel_bytes_clean,
     file_name=f"pharma_market_opportunity_{datetime.now():%Y%m%d_%H%M}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
 
-tab1, tab2, tab3, tab4 = st.tabs(["📌 Synthèse", "📊 Graphiques", "🧾 Détails marché", "📚 Nomenclature"])
+tab_market, tab_hosp, tab_ville, tab_graph_all, tab_graph_hosp, tab_graph_ville, tab_nom = st.tabs([
+    "📌 Analyse marché",
+    "🏥 Ventes hospitalières",
+    "🏙️ Marché de ville",
+    "📊 Graphiques généraux",
+    "🏥 Graphiques hospitalier",
+    "🏙️ Graphiques ville",
+    "📚 Nomenclature",
+])
 
-with tab1:
-    st.dataframe(main, use_container_width=True, height=430)
+with tab_market:
+    st.caption("Synthèse business consolidée. La colonne Dossier availability a été retirée pour garder une lecture claire.")
+    st.dataframe(summary_display, use_container_width=True, height=430)
 
-with tab2:
-    if not market_detail.empty:
-        by_lab = market_detail.groupby(["SOURCE_MARKET", "LABORATOIRE"], dropna=False).agg(
-            Value_DZD=("Market_Size_Value_DZD", "sum"), Volume=("Market_Size_Volume", "sum")
-        ).reset_index().sort_values("Value_DZD", ascending=False).head(20)
-        fig = px.bar(by_lab, x="LABORATOIRE", y="Value_DZD", color="SOURCE_MARKET", title="Top players by market value")
-        fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Laboratoire", yaxis_title="Valeur DZD")
-        st.plotly_chart(fig, use_container_width=True)
-        by_source = market_detail.groupby("SOURCE_MARKET", dropna=False).agg(Value_DZD=("Market_Size_Value_DZD", "sum")).reset_index()
-        fig2 = px.pie(by_source, names="SOURCE_MARKET", values="Value_DZD", title="Split par source marché")
-        fig2.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig2, use_container_width=True)
+with tab_hosp:
+    st.caption("Détail des ventes / réceptions hospitalières PCH uniquement. Colonnes techniques de matching masquées.")
+    if hospital_display.empty:
+        st.info("Aucune donnée hospitalière PCH trouvée pour ces filtres.")
+    else:
+        st.dataframe(hospital_display, use_container_width=True, height=520)
 
-with tab3:
-    st.dataframe(market_detail, use_container_width=True, height=520)
+with tab_ville:
+    st.caption("Détail du marché ville IQVIA uniquement. Colonnes techniques de matching masquées.")
+    if ville_display.empty:
+        st.info("Aucune donnée IQVIA ville trouvée pour ces filtres.")
+    else:
+        st.dataframe(ville_display, use_container_width=True, height=520)
 
-with tab4:
-    if nom_detail is not None and not nom_detail.empty:
-        st.dataframe(nom_detail, use_container_width=True, height=520)
+with tab_graph_all:
+    draw_market_charts(market_detail, "— global")
+
+with tab_graph_hosp:
+    draw_market_charts(hospital_detail, "— hospitalier PCH")
+
+with tab_graph_ville:
+    draw_market_charts(ville_detail, "— marché ville IQVIA")
+
+with tab_nom:
+    if nom_display is not None and not nom_display.empty:
+        st.dataframe(nom_display, use_container_width=True, height=520)
     else:
         st.info("Aucun match nomenclature avec les filtres actuels.")
