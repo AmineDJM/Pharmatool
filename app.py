@@ -5,6 +5,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from strategic_recommendations import render_strategic_recommendations_page
+
 from market_engine import (
     CONFIG,
     build_option_universe,
@@ -136,10 +138,24 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
+with st.sidebar:
+    st.markdown("### 🧭 Navigation")
+    page = st.radio(
+        "Page",
+        ["Analyse produit / DCI", "Recommandations stratégiques"],
+        index=0,
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
+
+if page == "Recommandations stratégiques":
+    render_strategic_recommendations_page(nom, iqvia, pch)
+    st.stop()
+
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.3 controlled-dci-business-tables</div>
+      <div class="badge">✨ Internal Market Intelligence Engine · Build v4.4 strategic-recommendations</div>
       <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
       <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, sélection DCI contrôlée par la Nomenclature, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
     </div>
