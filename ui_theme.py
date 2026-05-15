@@ -1,4 +1,3 @@
-# ui_theme.py
 import streamlit as st
 
 BUILD_VERSION = "v4.5 premium-mobile-ui"
