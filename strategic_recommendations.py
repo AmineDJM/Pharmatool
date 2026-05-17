@@ -15,6 +15,7 @@ import plotly.express as px
 import streamlit as st
 
 from market_engine import CONFIG, norm_text, safe_unique, tokens
+from ui_theme import format_dataframe_for_display
 
 
 DEFAULT_RULES = {
@@ -30,13 +31,15 @@ def _fmt_money(x: float) -> str:
         return "—"
     if np.isnan(x):
         return "—"
+    def sp(v, d=0):
+        return f"{v:,.{d}f}".replace(",", " ")
     if abs(x) >= 1_000_000_000:
-        return f"{x/1_000_000_000:,.2f} B"
+        return f"{sp(x/1_000_000_000, 2)} B"
     if abs(x) >= 1_000_000:
-        return f"{x/1_000_000:,.1f} M"
+        return f"{sp(x/1_000_000, 1)} M"
     if abs(x) >= 1_000:
-        return f"{x/1_000:,.1f} K"
-    return f"{x:,.0f}"
+        return sp(x, 0)
+    return sp(x, 0)
 
 
 def _status_bucket(status: object) -> str:
@@ -408,7 +411,7 @@ def render_strategic_recommendations_page(nom: pd.DataFrame, iqvia: pd.DataFrame
     tab_table, tab_charts, tab_market_build = st.tabs(["📌 Recommandations", "📊 Graphiques", "🧾 Construction marché"])
     with tab_table:
         st.caption("Liste priorisée selon valeur marché, fabricants locaux détectés dans la Nomenclature, importateurs et score d’opportunité.")
-        st.dataframe(shown, use_container_width=True, height=620)
+        st.dataframe(format_dataframe_for_display(shown), use_container_width=True, height=620)
     with tab_charts:
         if shown.empty:
             st.info("Aucune donnée à grapher.")
@@ -432,4 +435,4 @@ def render_strategic_recommendations_page(nom: pd.DataFrame, iqvia: pd.DataFrame
             st.plotly_chart(fig2, use_container_width=True)
     with tab_market_build:
         st.caption("Table technique de construction : agrégation par DCI et source marché. Utile pour audit / contrôle.")
-        st.dataframe(market_build, use_container_width=True, height=560)
+        st.dataframe(format_dataframe_for_display(market_build), use_container_width=True, height=560)

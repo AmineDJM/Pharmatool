@@ -3,7 +3,7 @@ import plotly.express as px
 import streamlit as st
 from datetime import datetime
 
-from ui_theme import fmt_money
+from ui_theme import fmt_money, format_dataframe_for_display
 from market_engine import (
     build_option_universe,
     build_opportunity_table,
@@ -23,7 +23,7 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
     st.markdown(
         """
         <div class="hero">
-          <div class="badge">✨ Internal Market Intelligence Engine · Build v4.5 modular-ui-responsive</div>
+          <div class="badge">✨ Internal Market Intelligence Engine · Build v4.6 pch-dzd-number-format</div>
           <h1>Algeria Pharma<br/>Opportunity Analyzer</h1>
           <p>Recherche DCI stricte et intelligente, filtres connectés entre eux, aperçu séparé Nomenclature / IQVIA / PCH, sélection DCI contrôlée par la Nomenclature, fenêtres marché ville et hospitalier, graphiques dédiés puis export Excel prêt pour décision business.</p>
         </div>
@@ -148,7 +148,7 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
             else:
                 st.caption("Source affichée ici : uniquement la Nomenclature. Toutes les lignes liées à la/aux DCI sélectionnée(s) sont affichées.")
                 cols = [c for c in ['_QUERY_DCI','DCI','BRAND','FORME','DOSAGE','CONDITIONNEMENT','LABORATOIRE','STATUT','TYPE','P1','P2','LISTE','SOURCE_NOMENCLATURE'] if c in preview_nom.columns]
-                st.dataframe(preview_nom[cols].head(1000), use_container_width=True, height=390)
+                st.dataframe(format_dataframe_for_display(preview_nom[cols].head(1000)), use_container_width=True, height=390)
 
         with t_iqvia:
             if preview_iqvia.empty:
@@ -156,7 +156,7 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
             else:
                 st.caption("Aperçu des lignes marché ville associées aux filtres actuels.")
                 cols = [c for c in ['_QUERY_DCI','MOLECULE','BRAND','PRESENTATION','LABORATOIRE','THERAPEUTIC_CLASS','MARKET_VOLUME','MARKET_VALUE_DZD','MARKET_VALUE_USD'] if c in preview_iqvia.columns]
-                st.dataframe(preview_iqvia[cols].head(1000), use_container_width=True, height=390)
+                st.dataframe(format_dataframe_for_display(preview_iqvia[cols].head(1000)), use_container_width=True, height=390)
 
         with t_pch:
             if preview_pch.empty:
@@ -164,7 +164,7 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
             else:
                 st.caption("Aperçu des lignes hospitalières associées aux filtres actuels.")
                 cols = [c for c in ['_QUERY_DCI','PRODUCT_FULL','LABORATOIRE','THERAPEUTIC_CLASS','QTE','UNIT_PRICE','DEVISE','MARKET_VALUE_DZD','MARKET_VALUE_USD','DATESTOCKAGE','TYPE_RECEP'] if c in preview_pch.columns]
-                st.dataframe(preview_pch[cols].head(1000), use_container_width=True, height=390)
+                st.dataframe(format_dataframe_for_display(preview_pch[cols].head(1000)), use_container_width=True, height=390)
 
     if run:
         dci_list = dci_input_to_list(selected_dcis, dci_search)
@@ -298,21 +298,21 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
 
     with tab_market:
         st.caption("Synthèse business consolidée. La colonne Dossier availability a été retirée pour garder une lecture claire.")
-        st.dataframe(summary_display, use_container_width=True, height=430)
+        st.dataframe(format_dataframe_for_display(summary_display), use_container_width=True, height=430)
 
     with tab_hosp:
         st.caption("Détail des ventes / réceptions hospitalières PCH uniquement. Colonnes techniques de matching masquées.")
         if hospital_display.empty:
             st.info("Aucune donnée hospitalière PCH trouvée pour ces filtres.")
         else:
-            st.dataframe(hospital_display, use_container_width=True, height=520)
+            st.dataframe(format_dataframe_for_display(hospital_display), use_container_width=True, height=520)
 
     with tab_ville:
         st.caption("Détail du marché ville IQVIA uniquement. Colonnes techniques de matching masquées.")
         if ville_display.empty:
             st.info("Aucune donnée IQVIA ville trouvée pour ces filtres.")
         else:
-            st.dataframe(ville_display, use_container_width=True, height=520)
+            st.dataframe(format_dataframe_for_display(ville_display), use_container_width=True, height=520)
 
     with tab_graph_all:
         draw_market_charts(market_detail, "— global")
@@ -325,6 +325,6 @@ def render_market_analysis_page(nom: pd.DataFrame, iqvia: pd.DataFrame, pch: pd.
 
     with tab_nom:
         if nom_display is not None and not nom_display.empty:
-            st.dataframe(nom_display, use_container_width=True, height=520)
+            st.dataframe(format_dataframe_for_display(nom_display), use_container_width=True, height=520)
         else:
             st.info("Aucun match nomenclature avec les filtres actuels.")

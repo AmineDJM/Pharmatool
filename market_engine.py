@@ -289,10 +289,15 @@ def prep_pch(pch):
     x['LAB_NORM'] = x['LABORATOIRE'].map(norm_text)
     x['QTE'] = x['QTE'].map(safe_num)
     x['UNIT_PRICE'] = x['UNIT_PRICE'].map(safe_num)
+    # IMPORTANT PCH BUSINESS RULE
+    # In the PCH reception file, UNIT_PRICE is already expressed in Algerian dinars (DZD),
+    # even when the DEVISE / CODE_MON column displays USD, EUR, CHF, etc.
+    # Therefore we must NEVER convert MARKET_VALUE_ORIG using DEVISE.
+    # Market value DZD = quantity * unit price as written in the file.
     x['MARKET_VALUE_ORIG'] = x['QTE'] * x['UNIT_PRICE']
     x['DEVISE_NORM'] = x['DEVISE'].fillna('DA').astype(str).str.upper().str.strip()
-    x['FX_TO_DZD'] = x['DEVISE_NORM'].map(CONFIG['FX_TO_DZD']).fillna(np.nan)
-    x['MARKET_VALUE_DZD'] = x['MARKET_VALUE_ORIG'] * x['FX_TO_DZD']
+    x['FX_TO_DZD'] = 1.0
+    x['MARKET_VALUE_DZD'] = x['MARKET_VALUE_ORIG']
     x['MARKET_VALUE_USD'] = x['MARKET_VALUE_DZD'] / CONFIG['DZD_PER_USD']
     x['MARKET_VOLUME'] = x['QTE']
     x['SOURCE_MARKET'] = 'PCH HOSPITALIER'
@@ -508,10 +513,8 @@ def summarize_market(market_df, source_name):
         agg = x.groupby(group_cols, dropna=False).agg(
             Therapeutic_Class=('THERAPEUTIC_CLASS','first'),
             Market_Size_Volume=('MARKET_VOLUME','sum'),
-            Market_Size_Value_Orig=('MARKET_VALUE_ORIG','sum'),
             Market_Size_Value_DZD=('MARKET_VALUE_DZD','sum'),
             Market_Size_Value_USD=('MARKET_VALUE_USD','sum'),
-            Currency=('DEVISE_NORM', lambda s: ', '.join(sorted(set(map(str, s.dropna()))))[:60]),
             Avg_Match_Score=('_DCI_SCORE','mean'),
             Dosage_Match_Score=('_DOSAGE_SCORE','mean')
         ).reset_index()
@@ -576,9 +579,9 @@ def export_excel(main, market_detail, nom_detail, output_file=None):
         wb = writer.book
         header_fmt = wb.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#0F766E', 'border':1, 'align':'center', 'valign':'vcenter'})
         orange_fmt = wb.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#F97316', 'border':1, 'align':'center', 'valign':'vcenter'})
-        money_fmt = wb.add_format({'num_format': '#,##0'})
+        money_fmt = wb.add_format({'num_format': '# ##0'})
         pct_fmt = wb.add_format({'num_format': '0.0%'})
-        num_fmt = wb.add_format({'num_format': '#,##0'})
+        num_fmt = wb.add_format({'num_format': '# ##0'})
         for sheet_name, df in [('Opportunity Summary',main), ('Market Detail',market_detail), ('Nomenclature Matches',nom_detail if nom_detail is not None else pd.DataFrame())]:
             ws = writer.sheets[sheet_name]
             ws.freeze_panes(1,0)
@@ -824,7 +827,7 @@ def export_excel_bytes(main, market_detail, nom_detail):
         wb = writer.book
         header = wb.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#0F172A', 'border': 1, 'align': 'center'})
         accent = wb.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#14B8A6', 'border': 1, 'align': 'center'})
-        money = wb.add_format({'num_format': '#,##0'})
+        money = wb.add_format({'num_format': '# ##0'})
         pct = wb.add_format({'num_format': '0.0%'})
         for sheet, df in [('Opportunity Summary', main), ('Market Detail', market_detail), ('Nomenclature Matches', nom_detail if nom_detail is not None else pd.DataFrame())]:
             ws = writer.sheets[sheet]

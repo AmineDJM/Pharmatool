@@ -1,10 +1,11 @@
 import streamlit as st
 
-from ui_theme import apply_theme, hero, section_title, info_card, BUILD_VERSION
+from ui_theme import BUILD_VERSION, apply_theme, configure_page
 from market_engine import load_prepared_data
 from market_analysis_page import render_market_analysis_page
 from strategic_recommendations import render_strategic_recommendations_page
 
+configure_page()
 apply_theme()
 
 
