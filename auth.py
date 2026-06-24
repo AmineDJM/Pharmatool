@@ -13,6 +13,7 @@ the GitHub repository private.
 
 import hmac
 import time
+from typing import Optional
 
 import streamlit as st
 
@@ -33,7 +34,7 @@ def _is_correct(entered: str) -> bool:
     return hmac.compare_digest(str(entered), _target_password())
 
 
-def _render_gate(message: str | None = None):
+def _render_gate(message: Optional[str] = None):
     st.markdown(
         """
         <div class="hero" style="max-width:520px;margin:8vh auto 0 auto;text-align:center;">
