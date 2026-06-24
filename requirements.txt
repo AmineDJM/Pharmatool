@@ -5,3 +5,5 @@ openpyxl>=3.1
 xlsxwriter>=3.2
 rapidfuzz>=3.9
 plotly>=5.22
+pyarrow>=14
+anthropic>=0.40

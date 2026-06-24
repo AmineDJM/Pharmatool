@@ -228,16 +228,44 @@ def find_file(patterns, year_aware=False):
     return cands[0]
 
 
+def _source_overrides():
+    import json
+    p = DATA_DIR / "_cache" / "sources.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def set_source_override(kind, path):
+    """Pin a specific file for a source kind ('iqvia' | 'pch' | 'nom'),
+    e.g. after an in-app upload. Used in priority by the finders."""
+    import json
+    (DATA_DIR / "_cache").mkdir(parents=True, exist_ok=True)
+    ov = _source_overrides()
+    ov[kind] = str(path)
+    (DATA_DIR / "_cache" / "sources.json").write_text(json.dumps(ov))
+
+
+def _override(kind):
+    p = _source_overrides().get(kind)
+    if p and Path(p).exists():
+        return Path(p)
+    return None
+
+
 def find_iqvia_file():
-    return find_file(["Algeria IQVIA*.xls*", "*IQVIA*.xls*"], year_aware=True)
+    return _override("iqvia") or find_file(["Algeria IQVIA*.xls*", "*IQVIA*.xls*"], year_aware=True)
 
 
 def find_pch_file():
-    return find_file(["Reception*.xls*", "*PCH*.xls*", "*eception*.xls*"])
+    return _override("pch") or find_file(["Reception*.xls*", "*PCH*.xls*", "*eception*.xls*"])
 
 
 def find_nomenclature_file():
-    return find_file(["NOMENCLATURE*.xls*", "*omenclature*.xls*", "*NOMENC*.xls*"])
+    return _override("nom") or find_file(["NOMENCLATURE*.xls*", "*omenclature*.xls*", "*NOMENC*.xls*"])
 
 
 def detect_period_columns(columns):
@@ -377,6 +405,11 @@ def prep_nomenclature(nom_active, nom_non=None, nom_ret=None):
     nom["LAB_NORM"] = nom["LABORATOIRE"].map(norm_text)
     nom["STATUS_NORM"] = nom["STATUT"].map(norm_text)
     nom["ORIGIN"] = nom["STATUT"].map(status_origin)  # LOCAL / IMPORT / OTHER
+    # Registration dates (column names carry irregular spacing in the source file)
+    init_col = next((c for c in nom.columns if "ENREGISTREMENT" in str(c).upper() and "INITIAL" in str(c).upper()), None)
+    final_col = next((c for c in nom.columns if "ENREGISTREMENT" in str(c).upper() and "FINAL" in str(c).upper()), None)
+    nom["DATE_ENR_INITIAL"] = pd.to_datetime(nom[init_col], errors="coerce") if init_col else pd.NaT
+    nom["DATE_ENR_FINAL"] = pd.to_datetime(nom[final_col], errors="coerce") if final_col else pd.NaT
     nom["PRODUCT_FULL"] = (
         nom["BRAND"].fillna("").astype(str) + " " + nom["FORME"].fillna("").astype(str) + " "
         + nom["DOSAGE"].fillna("").astype(str) + " " + nom["CONDITIONNEMENT"].fillna("").astype(str)
@@ -690,6 +723,94 @@ def nomenclature_origin_for_dci(nom, dci_list):
     imp = sorted(set(sub.loc[sub["ORIGIN"].eq("IMPORT"), "LABORATOIRE"].replace("", pd.NA).dropna().astype(str)))
     other = sorted(set(sub.loc[sub["ORIGIN"].eq("OTHER"), "LABORATOIRE"].replace("", pd.NA).dropna().astype(str)))
     return {"local_labs": local, "import_labs": imp, "other_labs": other}
+
+
+def parse_smart_query(text, nom):
+    """Parse a free-text query like 'amoxicilline 500 mg comprime' into
+    {dci_candidates, dosage, forme}. Powers the intelligent pricing search."""
+    raw = str(text or "").strip()
+    if not raw:
+        return {"dci_candidates": [], "dosage": [], "forme": []}
+    # dosage tokens
+    dos = parse_dosage_units(raw)
+    dosage = sorted({d["raw"].strip() for d in dos if d.get("raw")})
+    # forme detection
+    formes = []
+    for canon, arr in FORM_SYNONYMS.items():
+        if any(norm_text(a) in norm_text(raw) for a in arr):
+            formes.append(canon)
+    # DCI: strip dosage/forme noise, rank remaining text against nomenclature DCIs
+    cleaned = norm_text(raw)
+    for d in dos:
+        cleaned = cleaned.replace(norm_text(d.get("raw", "")), " ")
+    for canon, arr in FORM_SYNONYMS.items():
+        for a in arr:
+            cleaned = re.sub(_regex_word_token(a), " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    dci_candidates = get_nomenclature_dci_options(nom, cleaned or raw, limit=10)
+    return {"dci_candidates": dci_candidates, "dosage": dosage, "forme": list(dict.fromkeys(formes))}
+
+
+def price_for_dci(iqvia, pch, nom, dci_list, dosage=None, formes=None, labs=None, markets=None):
+    """Price intelligence for a DCI: average / range price per box (IQVIA ville)
+    and per unit (PCH hospitalier), plus per-product detail."""
+    markets = markets or [SRC_IQVIA, SRC_PCH]
+    out = {"ville": None, "hospital": None, "ville_rows": pd.DataFrame(), "hospital_rows": pd.DataFrame()}
+
+    def _stats(prices, avg):
+        prices = pd.to_numeric(pd.Series(prices), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        return {
+            "avg_dzd": avg,
+            "avg_usd": (avg / CONFIG["DZD_PER_USD"]) if avg == avg else np.nan,
+            "min": float(prices.min()) if len(prices) else np.nan,
+            "median": float(prices.median()) if len(prices) else np.nan,
+            "max": float(prices.max()) if len(prices) else np.nan,
+            "n": int(len(prices)),
+        }
+
+    if SRC_IQVIA in markets:
+        iq = filter_iqvia(iqvia, dci_list, dosage, formes, labs)
+        if iq is not None and not iq.empty:
+            if "PROD_KEY" in iq.columns:
+                iq = iq.sort_values("MARKET_VALUE_DZD", ascending=False).drop_duplicates(subset=["_QUERY_DCI", "PROD_KEY"])
+            iq = iq.copy()
+            iq["Prix_boite_DZD"] = np.where(iq["MARKET_VOLUME"] > 0, iq["MARKET_VALUE_DZD"] / iq["MARKET_VOLUME"], np.nan)
+            tv, tvol = iq["MARKET_VALUE_DZD"].sum(), iq["MARKET_VOLUME"].sum()
+            out["ville"] = _stats(iq["Prix_boite_DZD"], tv / tvol if tvol > 0 else np.nan)
+            out["ville_rows"] = iq[[c for c in ["BRAND", "PRESENTATION", "LABORATOIRE", "MARKET_VOLUME", "MARKET_VALUE_DZD", "Prix_boite_DZD", "GROWTH_PY"] if c in iq.columns]].sort_values("MARKET_VALUE_DZD", ascending=False)
+
+    if SRC_PCH in markets:
+        ph = filter_pch(pch, dci_list, dosage, formes, labs)
+        if ph is not None and not ph.empty:
+            ph = ph.copy()
+            ph["Prix_unitaire_DZD"] = pd.to_numeric(ph["UNIT_PRICE"], errors="coerce")
+            tv, tvol = (ph["Prix_unitaire_DZD"] * ph["QTE"]).sum(), ph["QTE"].sum()
+            out["hospital"] = _stats(ph["Prix_unitaire_DZD"], tv / tvol if tvol > 0 else np.nan)
+            out["hospital_rows"] = ph[[c for c in ["PRODUCT_FULL", "LABORATOIRE", "QTE", "Prix_unitaire_DZD", "MARKET_VALUE_DZD", "DEVISE", "DATESTOCKAGE"] if c in ph.columns]].sort_values("MARKET_VALUE_DZD", ascending=False)
+    return out
+
+
+def nomenclature_dci_dates(nom, active_only=True):
+    """Per-DCI registration timeline: latest initial registration and nearest expiry."""
+    if nom is None or nom.empty or "DCI" not in nom.columns:
+        return pd.DataFrame(columns=["DCI", "DCI_NORM_KEY", "Last_registration", "Next_expiry", "Registrations"])
+    x = nom.copy()
+    if active_only and "SOURCE_NOMENCLATURE" in x.columns:
+        x = x[x["SOURCE_NOMENCLATURE"].astype(str).str.upper().eq("ACTIVE")]
+    x = x[x["DCI"].notna() & x["DCI"].astype(str).str.strip().ne("")]
+    if x.empty:
+        return pd.DataFrame(columns=["DCI", "DCI_NORM_KEY", "Last_registration", "Next_expiry", "Registrations"])
+    x["DCI_NORM_KEY"] = x["DCI"].map(norm_text)
+    rows = []
+    for key, g in x.groupby("DCI_NORM_KEY", dropna=False):
+        rows.append({
+            "DCI": safe_unique(g["DCI"], 5)[0] if len(g) else key,
+            "DCI_NORM_KEY": key,
+            "Last_registration": pd.to_datetime(g["DATE_ENR_INITIAL"], errors="coerce").max(),
+            "Next_expiry": pd.to_datetime(g["DATE_ENR_FINAL"], errors="coerce").max(),
+            "Registrations": int(len(g)),
+        })
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------
@@ -1080,7 +1201,7 @@ def filter_options(options, query, limit=500):
 # ------------------------------------------------------------
 # 12) MASTER LOADER  (+ Parquet cache for fast cold starts)
 # ------------------------------------------------------------
-CACHE_VERSION = "v5.0"
+CACHE_VERSION = "v5.1"
 CACHE_DIR = DATA_DIR / "_cache"
 _CACHE_TABLES = ["nom", "iqvia", "pch", "lab_landscape", "iqvia_lab_raw"]
 
