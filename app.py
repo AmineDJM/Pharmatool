@@ -2,6 +2,7 @@ import streamlit as st
 
 import market_engine as me
 from ui_theme import BUILD_VERSION, apply_theme, configure_page
+from auth import require_password
 from market_overview_page import render_market_overview_page
 from market_analysis_page import render_market_analysis_page
 from competition_page import render_competition_page
@@ -9,6 +10,9 @@ from strategic_recommendations import render_strategic_recommendations_page
 
 configure_page()
 apply_theme()
+
+# Server-side gate: nothing below (data load, pages) runs until authenticated.
+require_password()
 
 
 @st.cache_data(show_spinner="Chargement IQVIA / PCH / Nomenclature…")
@@ -54,5 +58,9 @@ with st.sidebar:
         f"📚 {meta.get('nom_file', '—')}"
     )
     st.caption(f"Build : {BUILD_VERSION}")
+    if st.button("🔒 Se déconnecter", use_container_width=True):
+        for k in ("auth_ok", "auth_attempts", "auth_locked_until"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 PAGES[page](data)
