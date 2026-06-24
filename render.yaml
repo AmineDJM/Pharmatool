@@ -1,0 +1,38 @@
+# Render Blueprint — 2 services : API Python (FastAPI) + front Next.js.
+# Déploiement : connecte ce repo sur render.com → "New + → Blueprint".
+# Puis renseigne les variables marquées sync:false dans le dashboard.
+
+services:
+  # ---------- Backend : API qui réutilise market_engine.py ----------
+  - type: web
+    name: pharmatool-api
+    runtime: python
+    region: frankfurt
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Clé Anthropic pour l'Assistant IA — à coller dans le dashboard Render.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+  # ---------- Frontend : Next.js ----------
+  - type: web
+    name: pharmatool-web
+    runtime: node
+    region: frankfurt
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.1
+      # URL publique de l'API ci-dessus (ex : https://pharmatool-api.onrender.com)
+      # À coller dans le dashboard Render après le 1er déploiement de l'API.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
