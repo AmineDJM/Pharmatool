@@ -6,7 +6,11 @@ from auth import require_password
 from market_overview_page import render_market_overview_page
 from market_analysis_page import render_market_analysis_page
 from competition_page import render_competition_page
+from pricing_page import render_pricing_page
+from radar_page import render_radar_page
 from strategic_recommendations import render_strategic_recommendations_page
+from assistant_page import render_assistant_page
+from data_page import render_data_page
 
 configure_page()
 apply_theme()
@@ -25,7 +29,11 @@ PAGES = {
     "🏠 Vue d'ensemble": render_market_overview_page,
     "🔬 Analyse produit / DCI": render_market_analysis_page,
     "🏟️ Analyse concurrentielle": render_competition_page,
+    "💰 Prix": render_pricing_page,
+    "📡 Radar opportunités": render_radar_page,
     "🧠 Opportunités stratégiques": render_strategic_recommendations_page,
+    "🤖 Assistant IA": render_assistant_page,
+    "📤 Données": render_data_page,
 }
 
 with st.sidebar:
@@ -58,7 +66,7 @@ with st.sidebar:
         f"📚 {meta.get('nom_file', '—')}"
     )
     st.caption(f"Build : {BUILD_VERSION}")
-    if st.button("🔒 Se déconnecter", use_container_width=True):
+    if st.button("🔒 Se déconnecter", width='stretch'):
         for k in ("auth_ok", "auth_attempts", "auth_locked_until"):
             st.session_state.pop(k, None)
         st.rerun()
