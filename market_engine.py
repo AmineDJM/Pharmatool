@@ -1078,9 +1078,76 @@ def filter_options(options, query, limit=500):
 
 
 # ------------------------------------------------------------
-# 12) MASTER LOADER
+# 12) MASTER LOADER  (+ Parquet cache for fast cold starts)
 # ------------------------------------------------------------
-def load_prepared_data(period=None):
+CACHE_VERSION = "v5.0"
+CACHE_DIR = DATA_DIR / "_cache"
+_CACHE_TABLES = ["nom", "iqvia", "pch", "lab_landscape", "iqvia_lab_raw"]
+
+
+def _source_signature(period):
+    """Identity of the inputs so a stale cache is detected automatically."""
+    import json
+    sig = {"cache_version": CACHE_VERSION, "period": (period or CONFIG["IQVIA_PERIOD"]).upper(), "files": {}}
+    for finder, key in [(find_iqvia_file, "iqvia"), (find_pch_file, "pch"), (find_nomenclature_file, "nom")]:
+        f = finder()
+        if f is not None:
+            st = f.stat()
+            sig["files"][key] = {"name": f.name, "size": st.st_size}
+    return json.dumps(sig, sort_keys=True)
+
+
+def _parquet_safe(df):
+    """Return a copy whose object columns are clean strings so pyarrow never chokes
+    on mixed str/float cells (the same issue Streamlit hits on display)."""
+    if df is None:
+        return pd.DataFrame()
+    x = df.copy()
+    for c in x.columns:
+        if x[c].dtype == object:
+            x[c] = x[c].map(lambda v: None if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
+    return x
+
+
+def _read_cache(period):
+    """Return the prepared-data dict from the Parquet cache, or None if missing/stale."""
+    sig_path = CACHE_DIR / "signature.json"
+    if not sig_path.exists():
+        return None
+    try:
+        if sig_path.read_text() != _source_signature(period):
+            return None
+        out = {}
+        for t in _CACHE_TABLES:
+            p = CACHE_DIR / f"{t}.parquet"
+            out[t] = pd.read_parquet(p) if p.exists() else pd.DataFrame()
+        out["meta"] = _build_meta()
+        return out
+    except Exception:
+        return None
+
+
+def _write_cache(data, period):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for t in _CACHE_TABLES:
+            _parquet_safe(data.get(t)).to_parquet(CACHE_DIR / f"{t}.parquet", index=False)
+        (CACHE_DIR / "signature.json").write_text(_source_signature(period))
+    except Exception:
+        pass  # read-only FS or missing pyarrow: degrade gracefully to live loading
+
+
+def _build_meta():
+    iqvia_file, pch_file, nom_file = find_iqvia_file(), find_pch_file(), find_nomenclature_file()
+    return {
+        "iqvia_file": iqvia_file.name if iqvia_file else None,
+        "iqvia_year": _latest_year_in_name(iqvia_file.stem) if iqvia_file else None,
+        "pch_file": pch_file.name if pch_file else None,
+        "nom_file": nom_file.name if nom_file else None,
+    }
+
+
+def _compute_prepared(period=None):
     iqvia_mol, iqvia_lab, iqvia_classprod, pch, nom_active, nom_non, nom_ret, meta = load_raw()
     nom = prep_nomenclature(nom_active, nom_non, nom_ret)
     iqvia = prep_iqvia(iqvia_mol, period)
@@ -1094,6 +1161,26 @@ def load_prepared_data(period=None):
         "iqvia_lab_raw": iqvia_lab,
         "meta": meta,
     }
+
+
+def load_prepared_data(period=None, use_cache=True):
+    """Prepared tables for the whole app. Reads a Parquet cache when valid
+    (cold start ~1s); otherwise parses the Excel sources and refreshes the cache."""
+    if use_cache:
+        cached = _read_cache(period)
+        if cached is not None:
+            return cached
+    data = _compute_prepared(period)
+    if use_cache:
+        _write_cache(data, period)
+    return data
+
+
+def build_cache(period=None):
+    """Force a rebuild of the Parquet cache from the Excel sources."""
+    data = _compute_prepared(period)
+    _write_cache(data, period)
+    return _build_meta()
 
 
 # ------------------------------------------------------------
@@ -1136,3 +1223,14 @@ def export_excel_bytes(*sheets):
                     ws.set_column(i, i, width)
     bio.seek(0)
     return bio.getvalue()
+
+
+# ------------------------------------------------------------
+# CLI: regenerate the Parquet cache  ->  python market_engine.py
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    import time
+    t0 = time.time()
+    meta = build_cache()
+    print(f"✅ Cache Parquet généré en {time.time()-t0:.1f}s  ->  {CACHE_DIR}")
+    print(f"   Sources: {meta}")
