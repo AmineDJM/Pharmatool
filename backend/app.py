@@ -13,6 +13,7 @@ import math
 import os
 import sys
 import time
+from functools import lru_cache
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List, Optional
@@ -114,15 +115,53 @@ class _State:
 S = _State()
 
 
+# Recommendations are expensive to compute (~20s: DCI matching + scoring over the
+# whole market). We cache the result to Parquet, keyed by the source-file signature,
+# so cold starts read it in ~1s instead of recomputing. The file is committed to the
+# repo, so even a fresh Render container (ephemeral disk) boots fast.
+REC_CACHE_VERSION = "r1"
+
+
+def _rec_paths():
+    return me.CACHE_DIR / "recommendations.parquet", me.CACHE_DIR / "recommendations.sig"
+
+
+def _rec_signature() -> str:
+    try:
+        base = me._source_signature(None)
+    except Exception:
+        base = "nosig"
+    return f"{REC_CACHE_VERSION}|{base}"
+
+
+def _load_recommendations(nom, iqvia, pch):
+    pq, sigp = _rec_paths()
+    want = _rec_signature()
+    if pq.exists() and sigp.exists():
+        try:
+            if sigp.read_text() == want:
+                return pd.read_parquet(pq), True
+        except Exception:
+            pass
+    recs, _ = analytics.build_recommendations(nom, iqvia, pch, [SRC_IQVIA, SRC_PCH], active_only=True)
+    try:
+        me.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        recs.to_parquet(pq, index=False)
+        sigp.write_text(want)
+    except Exception:
+        pass  # read-only FS: degrade gracefully
+    return recs, False
+
+
 def _boot():
     t0 = time.time()
     S.data = load_prepared_data()
     nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
-    S.recs, _ = analytics.build_recommendations(nom, iqvia, pch, [SRC_IQVIA, SRC_PCH], active_only=True)
+    S.recs, cached = _load_recommendations(nom, iqvia, pch)
     S.dci_dates = nomenclature_dci_dates(nom, active_only=True)
     S.ready = True
-    print(f"[pharmatool-api] data + recommendations ready in {time.time()-t0:.1f}s "
-          f"({len(S.recs)} DCI scored)")
+    print(f"[pharmatool-api] ready in {time.time()-t0:.1f}s "
+          f"({len(S.recs)} DCI scored · recommandations {'lues du cache' if cached else 'recalculées'})")
 
 
 app = FastAPI(title="Pharmatool API", version="1.0.0")
@@ -166,8 +205,8 @@ def meta():
 # Overview / dashboard
 # ------------------------------------------------------------
 
-@app.get("/api/overview")
-def overview():
+@lru_cache(maxsize=1)
+def _overview_payload():
     iqvia = S.data["iqvia"]
     iqvia_lab_raw = S.data["iqvia_lab_raw"]
     total = iqvia_total_market(iqvia_lab_raw, iqvia)
@@ -201,6 +240,11 @@ def overview():
         "growers": records(growers, mom_cols),
         "decliners": records(decliners, mom_cols),
     }
+
+
+@app.get("/api/overview")
+def overview():
+    return _overview_payload()
 
 
 # ------------------------------------------------------------
@@ -352,6 +396,25 @@ def _clean_list(xs: List[str]) -> List[str]:
     return [x.strip() for x in (xs or []) if str(x).strip()]
 
 
+# The DCI fuzzy matching is the heavy part (~600ms) and depends only on the DCI(s)
+# and chosen markets — not on the dosage/forme/lab filters. We memoize it so that
+# tweaking a filter only re-runs the cheap apply_filters / facet_filter step.
+@lru_cache(maxsize=64)
+def _universe(dci_t: tuple, markets_t: tuple):
+    return build_option_universe(", ".join(dci_t), list(markets_t),
+                                 S.data["nom"], S.data["iqvia"], S.data["pch"])
+
+
+@lru_cache(maxsize=64)
+def _matched(dci_t: tuple, markets_t: tuple):
+    nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
+    dci_list, mk = list(dci_t), list(markets_t)
+    nom_b = filter_nomenclature(nom, dci_list)
+    iq_b = filter_iqvia(iqvia, dci_list) if SRC_IQVIA in mk else pd.DataFrame()
+    pch_b = filter_pch(pch, dci_list) if SRC_PCH in mk else pd.DataFrame()
+    return nom_b, iq_b, pch_b
+
+
 @app.get("/api/dci/options")
 def dci_options(q: str = Query("", max_length=120)):
     """Autocomplete DCI names from the official Nomenclature."""
@@ -374,7 +437,7 @@ def dci_facets(dci: List[str] = Query(default=[]),
              "n_candidates": 0, "n_nomenclature": 0, "n_iqvia": 0, "n_pch": 0}
     if not dci_list:
         return empty
-    universe = build_option_universe(", ".join(dci_list), mk, nom, iqvia, pch)
+    universe = _universe(tuple(sorted(dci_list)), tuple(sorted(mk)))
     if universe is None or universe.empty:
         return empty
     dosage, forme, lab, statut = _clean_list(dosage), _clean_list(forme), _clean_list(lab), _clean_list(statut)
@@ -469,9 +532,10 @@ def dci_analysis(dci: List[str] = Query(default=[]),
     lab_l = _clean_list(lab) or None
     statut_l = _clean_list(statut) or None
 
-    nom_m = filter_nomenclature(nom, dci_list, dosage_l, forme_l, lab_l, statut_l)
-    iq_m = filter_iqvia(iqvia, dci_list, dosage_l, forme_l, lab_l) if SRC_IQVIA in mk else pd.DataFrame()
-    pch_m = filter_pch(pch, dci_list, dosage_l, forme_l, lab_l) if SRC_PCH in mk else pd.DataFrame()
+    nom_b, iq_b, pch_b = _matched(tuple(sorted(dci_list)), tuple(sorted(mk)))
+    nom_m = me.apply_filters(nom_b, dosage_l, forme_l, lab_l, statut_l, "nom") if nom_b is not None and not nom_b.empty else nom_b
+    iq_m = me.apply_filters(iq_b, dosage_l, forme_l, lab_l, None, "iqvia") if iq_b is not None and not iq_b.empty else iq_b
+    pch_m = me.apply_filters(pch_b, dosage_l, forme_l, lab_l, None, "pch") if pch_b is not None and not pch_b.empty else pch_b
     main, market_detail, _ = build_opportunity_table(nom_m, iq_m, pch_m)
 
     if market_detail is None or market_detail.empty:

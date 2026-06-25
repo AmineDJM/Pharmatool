@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useState } from "react";
 import { api, DciParams } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
+import { useDebounced } from "@/lib/useDebounced";
 import { fmtMoney, fmtInt, fmtGrowth, fmtPct, growthTone } from "@/lib/format";
 import { Hero } from "@/components/Hero";
 import { DciSearch } from "@/components/DciSearch";
@@ -31,9 +32,10 @@ export default function AnalysePage() {
 
   const has = dci.length > 0;
   const params: DciParams = { dci, markets, dosage, forme, lab };
+  const key = useDebounced(JSON.stringify(params), 300);
 
-  const facets = useAsync(() => (has ? api.dciFacets(params) : Promise.resolve(null)), [dci, markets, dosage, forme, lab]);
-  const analysis = useAsync(() => (has ? api.dciAnalysis(params) : Promise.resolve(null)), [dci, markets, dosage, forme, lab]);
+  const facets = useAsync(() => (has ? api.dciFacets(params) : Promise.resolve(null)), [key]);
+  const analysis = useAsync(() => (has ? api.dciAnalysis(params) : Promise.resolve(null)), [key]);
 
   const f = facets.data;
   const a = analysis.data;

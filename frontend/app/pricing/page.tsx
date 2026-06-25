@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api, DciParams } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
+import { useDebounced } from "@/lib/useDebounced";
 import { fmtMoney, fmtInt, fmtGrowth } from "@/lib/format";
 import { Hero } from "@/components/Hero";
 import { DciSearch } from "@/components/DciSearch";
@@ -32,9 +33,10 @@ export default function PricingPage() {
 
   const has = dci.length > 0;
   const params: DciParams = { dci, dosage, forme, lab };
+  const key = useDebounced(JSON.stringify(params), 300);
 
-  const facets = useAsync(() => (has ? api.dciFacets(params) : Promise.resolve(null)), [dci, dosage, forme, lab]);
-  const price = useAsync(() => (has ? api.pricing(params) : Promise.resolve(null)), [dci, dosage, forme, lab]);
+  const facets = useAsync(() => (has ? api.dciFacets(params) : Promise.resolve(null)), [key]);
+  const price = useAsync(() => (has ? api.pricing(params) : Promise.resolve(null)), [key]);
 
   const f = facets.data;
   const p = price.data;

@@ -1,0 +1,1 @@
+r1|{"cache_version": "v5.1", "files": {"iqvia": {"name": "Algeria IQVIA Data March 26.xlsx", "size": 5456516}, "nom": {"name": "NOMENCLATURE.VERSION.AVRIL_.2026-.xlsx", "size": 1224945}, "pch": {"name": "Reception2025_copy.xlsx", "size": 998133}}, "period": "MAT"}
