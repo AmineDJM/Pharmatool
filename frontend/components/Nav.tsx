@@ -7,6 +7,7 @@ import { useState } from "react";
 
 const LINKS = [
   { href: "/", label: "Vue d'ensemble", icon: "🏠" },
+  { href: "/analyse", label: "Analyse DCI", icon: "🔬" },
   { href: "/radar", label: "Radar opportunités", icon: "📡" },
   { href: "/pricing", label: "Prix par molécule", icon: "💰" },
   { href: "/opportunities", label: "Opportunités stratégiques", icon: "🧠" },

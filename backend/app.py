@@ -36,14 +36,23 @@ from market_engine import (
     CONFIG,
     SRC_IQVIA,
     SRC_PCH,
+    build_opportunity_table,
+    build_option_universe,
+    facet_filter,
+    filter_iqvia,
+    filter_nomenclature,
+    filter_pch,
+    get_nomenclature_dci_options,
     iqvia_class_breakdown,
     iqvia_total_market,
     compute_hhi,
     hhi_label,
     load_prepared_data,
     nomenclature_dci_dates,
+    nomenclature_origin_for_dci,
     parse_smart_query,
     price_for_dci,
+    safe_unique,
 )
 import analytics
 
@@ -323,6 +332,78 @@ def opportunities(view: str = Query("eligible", regex="^(eligible|import_substit
 
 
 # ------------------------------------------------------------
+# DCI search + connected facets (shared by Pricing & Analysis)
+# ------------------------------------------------------------
+
+def _markets(markets: List[str]) -> List[str]:
+    if not markets:
+        return [SRC_IQVIA, SRC_PCH]
+    out = []
+    for m in markets:
+        k = str(m).strip().lower()
+        if k in ("iqvia", "ville", SRC_IQVIA.lower()):
+            out.append(SRC_IQVIA)
+        elif k in ("pch", "hosp", "hospital", SRC_PCH.lower()):
+            out.append(SRC_PCH)
+    return out or [SRC_IQVIA, SRC_PCH]
+
+
+def _clean_list(xs: List[str]) -> List[str]:
+    return [x.strip() for x in (xs or []) if str(x).strip()]
+
+
+@app.get("/api/dci/options")
+def dci_options(q: str = Query("", max_length=120)):
+    """Autocomplete DCI names from the official Nomenclature."""
+    return {"candidates": get_nomenclature_dci_options(S.data["nom"], q, limit=50)}
+
+
+@app.get("/api/dci/facets")
+def dci_facets(dci: List[str] = Query(default=[]),
+               markets: List[str] = Query(default=[]),
+               dosage: List[str] = Query(default=[]),
+               forme: List[str] = Query(default=[]),
+               lab: List[str] = Query(default=[]),
+               statut: List[str] = Query(default=[])):
+    """Connected filters: available dosage / forme / lab / statut options for the
+    selected DCI(s), each computed against the other current selections."""
+    nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
+    dci_list = _clean_list(dci)
+    mk = _markets(markets)
+    empty = {"dosage": [], "forme": [], "lab": [], "statut": [],
+             "n_candidates": 0, "n_nomenclature": 0, "n_iqvia": 0, "n_pch": 0}
+    if not dci_list:
+        return empty
+    universe = build_option_universe(", ".join(dci_list), mk, nom, iqvia, pch)
+    if universe is None or universe.empty:
+        return empty
+    dosage, forme, lab, statut = _clean_list(dosage), _clean_list(forme), _clean_list(lab), _clean_list(statut)
+    # Dosage options: clean dosages from the official Nomenclature only — the IQVIA/PCH
+    # "dosage" column is the raw product label and far too messy to pick from.
+    uni_dose = universe[universe["source"] == "NOMENCLATURE"]
+    if uni_dose.empty:
+        uni_dose = universe
+    dosage_opts = safe_unique(facet_filter(uni_dose, dosage=[], formes=forme, labs=lab, statuts=statut, markets=mk, ignore={"dosage"})["dosage"], 400)
+    # Forme options: keep only recognized canonical forms (drop raw label leftovers).
+    canon_forms = set(me.FORM_SYNONYMS.keys())
+    forme_raw = safe_unique(facet_filter(universe, dosage=dosage, formes=[], labs=lab, statuts=statut, markets=mk, ignore={"forme"})["forme"], 400)
+    forme_opts = [f for f in forme_raw if f in canon_forms]
+    lab_opts = safe_unique(facet_filter(universe, dosage=dosage, formes=forme, labs=[], statuts=statut, markets=mk, ignore={"lab"})["lab"], 800)
+    statut_opts = [x for x in safe_unique(facet_filter(universe, dosage=dosage, formes=forme, labs=lab, statuts=[], markets=mk, ignore={"statut"})["statut"], 80) if x]
+    live = facet_filter(universe, dosage=dosage, formes=forme, labs=lab, statuts=statut, markets=mk)
+    return {
+        "dosage": dosage_opts,
+        "forme": forme_opts,
+        "lab": lab_opts,
+        "statut": statut_opts,
+        "n_candidates": int(len(live)),
+        "n_nomenclature": int((live["source"] == "NOMENCLATURE").sum()) if not live.empty else 0,
+        "n_iqvia": int((live["source"] == SRC_IQVIA).sum()) if not live.empty else 0,
+        "n_pch": int((live["source"] == SRC_PCH).sum()) if not live.empty else 0,
+    }
+
+
+# ------------------------------------------------------------
 # Pricing
 # ------------------------------------------------------------
 
@@ -336,19 +417,30 @@ def pricing_suggest(q: str = Query(..., min_length=1)):
     }
 
 
-@app.get("/api/pricing")
-def pricing(dci: str = Query(..., min_length=1),
-            dosage: Optional[str] = None,
-            forme: Optional[str] = None):
-    iqvia, pch, nom = S.data["iqvia"], S.data["pch"], S.data["nom"]
-    dosage_list = [d for d in (dosage.split(",") if dosage else []) if d.strip()] or None
-    forme_list = [f for f in (forme.split(",") if forme else []) if f.strip()] or None
-    res = price_for_dci(iqvia, pch, nom, [dci], dosage_list, forme_list, None, [SRC_IQVIA, SRC_PCH])
+def _stats(s):
+    if not s:
+        return None
+    return {k: _clean(s.get(k)) for k in ("n", "avg_dzd", "avg_usd", "median", "min", "max")}
 
+
+@app.get("/api/pricing")
+def pricing(dci: List[str] = Query(default=[]),
+            dosage: List[str] = Query(default=[]),
+            forme: List[str] = Query(default=[]),
+            lab: List[str] = Query(default=[]),
+            markets: List[str] = Query(default=[])):
+    iqvia, pch, nom = S.data["iqvia"], S.data["pch"], S.data["nom"]
+    dci_list = _clean_list(dci)
+    if not dci_list:
+        raise HTTPException(status_code=400, detail="dci_required")
+    mk = _markets(markets)
+    res = price_for_dci(iqvia, pch, nom, dci_list,
+                        _clean_list(dosage) or None, _clean_list(forme) or None,
+                        _clean_list(lab) or None, mk)
     ville_cols = ["BRAND", "PRESENTATION", "LABORATOIRE", "MARKET_VOLUME", "MARKET_VALUE_DZD", "Prix_boite_DZD", "GROWTH_PY"]
     hosp_cols = ["PRODUCT_FULL", "LABORATOIRE", "QTE", "Prix_unitaire_DZD", "MARKET_VALUE_DZD", "DEVISE", "DATESTOCKAGE"]
     return {
-        "dci": dci,
+        "dci": dci_list,
         "ville": _stats(res.get("ville")),
         "ville_rows": records(res.get("ville_rows"), ville_cols),
         "hospital": _stats(res.get("hospital")),
@@ -356,10 +448,97 @@ def pricing(dci: str = Query(..., min_length=1),
     }
 
 
-def _stats(s):
-    if not s:
-        return None
-    return {k: _clean(s.get(k)) for k in ("n", "avg_dzd", "avg_usd", "median", "min", "max")}
+# ------------------------------------------------------------
+# DCI full market analysis — competitive landscape + chart data
+# ------------------------------------------------------------
+
+@app.get("/api/dci/analysis")
+def dci_analysis(dci: List[str] = Query(default=[]),
+                 markets: List[str] = Query(default=[]),
+                 dosage: List[str] = Query(default=[]),
+                 forme: List[str] = Query(default=[]),
+                 lab: List[str] = Query(default=[]),
+                 statut: List[str] = Query(default=[])):
+    nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
+    dci_list = _clean_list(dci)
+    if not dci_list:
+        raise HTTPException(status_code=400, detail="dci_required")
+    mk = _markets(markets)
+    dosage_l = _clean_list(dosage) or None
+    forme_l = _clean_list(forme) or None
+    lab_l = _clean_list(lab) or None
+    statut_l = _clean_list(statut) or None
+
+    nom_m = filter_nomenclature(nom, dci_list, dosage_l, forme_l, lab_l, statut_l)
+    iq_m = filter_iqvia(iqvia, dci_list, dosage_l, forme_l, lab_l) if SRC_IQVIA in mk else pd.DataFrame()
+    pch_m = filter_pch(pch, dci_list, dosage_l, forme_l, lab_l) if SRC_PCH in mk else pd.DataFrame()
+    main, market_detail, _ = build_opportunity_table(nom_m, iq_m, pch_m)
+
+    if market_detail is None or market_detail.empty:
+        return {"empty": True, "dci": dci_list}
+
+    # Competitive landscape: one row per laboratory (city + hospital combined)
+    by_lab = market_detail.groupby("LABORATOIRE", dropna=False).agg(
+        Value_DZD=("Market_Size_Value_DZD", "sum"),
+        Volume=("Market_Size_Volume", "sum"),
+    ).reset_index()
+    gr = market_detail.groupby("LABORATOIRE", dropna=False).apply(
+        lambda d: me.weighted_growth_py(d["Market_Size_Value_DZD"], d.get("Growth_PY", pd.Series(dtype=float)))
+    ).rename("Growth_PY").reset_index()
+    by_lab = by_lab.merge(gr, on="LABORATOIRE", how="left")
+    total = by_lab["Value_DZD"].sum()
+    by_lab["Share"] = np.where(total > 0, by_lab["Value_DZD"] / total, np.nan)
+    by_lab["Value_USD"] = by_lab["Value_DZD"] / CONFIG["DZD_PER_USD"]
+    by_lab = by_lab.sort_values("Value_DZD", ascending=False).reset_index(drop=True)
+
+    origin = nomenclature_origin_for_dci(nom, dci_list)
+    hhi = compute_hhi(by_lab["Share"])
+    overall_growth = me.weighted_growth_py(market_detail["Market_Size_Value_DZD"],
+                                           market_detail.get("Growth_PY", pd.Series(dtype=float)))
+    n_players = int(market_detail["LABORATOIRE"].replace("", np.nan).dropna().nunique())
+
+    def _clean_market(df):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        x = df.rename(columns={
+            "_QUERY_DCI": "DCI", "PRODUCT_FULL": "Produit", "LABORATOIRE": "Laboratoire",
+            "Therapeutic_Class": "Classe", "Market_Size_Volume": "Volume",
+            "Market_Size_Value_DZD": "Valeur DZD", "Market_Size_Value_USD": "Valeur USD",
+            "Growth_PY": "Croissance",
+        })
+        cols = [c for c in ["DCI", "Produit", "Laboratoire", "Classe", "Volume", "Valeur DZD", "Valeur USD", "Croissance"] if c in x.columns]
+        x = x[cols]
+        return x.sort_values("Valeur DZD", ascending=False) if "Valeur DZD" in x.columns else x
+
+    ville = _clean_market(market_detail[market_detail["SOURCE_MARKET"].eq(SRC_IQVIA)])
+    hosp = _clean_market(market_detail[market_detail["SOURCE_MARKET"].eq(SRC_PCH)])
+
+    comp_cols = ["LABORATOIRE", "Value_DZD", "Value_USD", "Volume", "Share", "Growth_PY"]
+    market_cols = ["DCI", "Produit", "Laboratoire", "Classe", "Volume", "Valeur DZD", "Valeur USD", "Croissance"]
+    return {
+        "empty": False,
+        "dci": dci_list,
+        "kpis": {
+            "value_dzd": num(main["Valeur DZD"].sum()) if "Valeur DZD" in main else 0,
+            "value_usd": num(main["Valeur USD"].sum()) if "Valeur USD" in main else 0,
+            "volume": num(main["Volume"].sum()) if "Volume" in main else 0,
+            "growth": _clean(overall_growth),
+            "n_competitors": n_players,
+            "hhi": _clean(hhi),
+            "hhi_label": hhi_label(hhi),
+        },
+        "origin": {
+            "local_labs": origin["local_labs"],
+            "import_labs": origin["import_labs"],
+            "n_local": len(origin["local_labs"]),
+            "n_import": len(origin["import_labs"]),
+        },
+        "competitors": records(by_lab, comp_cols),
+        "ville_rows": records(ville, market_cols),
+        "hospital_rows": records(hosp, market_cols),
+        "n_ville": int(len(ville)),
+        "n_hosp": int(len(hosp)),
+    }
 
 
 # ------------------------------------------------------------

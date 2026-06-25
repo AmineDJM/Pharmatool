@@ -35,6 +35,27 @@ async function postJSON<T = any>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+export type DciParams = {
+  dci: string[];
+  markets?: string[];
+  dosage?: string[];
+  forme?: string[];
+  lab?: string[];
+  statut?: string[];
+};
+
+// Build a query string, appending one entry per value for array params
+// (?dci=a&dci=b) so values containing commas (lab names) survive intact.
+function buildQuery(params: Record<string, string | string[] | undefined>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) v.forEach((x) => x !== null && x !== undefined && x !== "" && sp.append(k, String(x)));
+    else if (v !== "") sp.append(k, String(v));
+  }
+  return sp.toString();
+}
+
 export const api = {
   meta: () => getJSON("/api/meta"),
   overview: () => getJSON("/api/overview"),
@@ -46,11 +67,9 @@ export const api = {
   opportunities: (view: string, minUsd: number, limit: number) =>
     getJSON(`/api/opportunities?view=${view}&min_usd=${minUsd}&limit=${limit}`),
   pricingSuggest: (q: string) => getJSON(`/api/pricing/suggest?q=${encodeURIComponent(q)}`),
-  pricing: (dci: string, dosage?: string, forme?: string) => {
-    const p = new URLSearchParams({ dci });
-    if (dosage) p.set("dosage", dosage);
-    if (forme) p.set("forme", forme);
-    return getJSON(`/api/pricing?${p.toString()}`);
-  },
+  dciOptions: (q: string) => getJSON(`/api/dci/options?q=${encodeURIComponent(q)}`),
+  dciFacets: (p: DciParams) => getJSON(`/api/dci/facets?${buildQuery({ ...p })}`),
+  dciAnalysis: (p: DciParams) => getJSON(`/api/dci/analysis?${buildQuery({ ...p })}`),
+  pricing: (p: DciParams) => getJSON(`/api/pricing?${buildQuery({ ...p })}`),
   assistant: (question: string) => postJSON("/api/assistant", { question }),
 };

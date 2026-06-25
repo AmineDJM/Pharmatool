@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useState } from "react";
+import { api, DciParams } from "@/lib/api";
+import { useAsync } from "@/lib/useAsync";
 import { fmtMoney, fmtInt, fmtGrowth } from "@/lib/format";
 import { Hero } from "@/components/Hero";
-import { Card, Kpi, KpiGrid, DataTable, Spinner, ErrorState, Badge, Section, EmptyState, Column } from "@/components/ui";
-
-type Parsed = { dci_candidates: string[]; dosage: string[]; forme: string[] };
+import { DciSearch } from "@/components/DciSearch";
+import { MultiSelect } from "@/components/MultiSelect";
+import { Card, Kpi, KpiGrid, DataTable, Spinner, ErrorState, EmptyState, Section, Column } from "@/components/ui";
 
 const moneyDZD = (v: any) => fmtMoney(v, "DZD");
 
@@ -23,42 +24,20 @@ function PriceStats({ stats, unit }: { stats: any; unit: string }) {
 }
 
 export default function PricingPage() {
-  const [query, setQuery] = useState("");
-  const [parsed, setParsed] = useState<Parsed | null>(null);
-  const [dci, setDci] = useState("");
-  const [useDosage, setUseDosage] = useState(false);
-  const [useForme, setUseForme] = useState(false);
-  const [price, setPrice] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [dci, setDci] = useState<string[]>([]);
+  const [dosage, setDosage] = useState<string[]>([]);
+  const [forme, setForme] = useState<string[]>([]);
+  const [lab, setLab] = useState<string[]>([]);
   const [tab, setTab] = useState<"ville" | "hosp">("ville");
 
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) { setParsed(null); setPrice(null); setError(null); return; }
-    const t = setTimeout(() => {
-      api.pricingSuggest(q).then((p: Parsed) => {
-        setParsed(p);
-        setDci(p.dci_candidates?.[0] || "");
-        setUseDosage(!!p.dosage?.length);
-        setUseForme(!!p.forme?.length);
-      }).catch((e) => setError(e.message));
-    }, 350);
-    return () => clearTimeout(t);
-  }, [query]);
+  const has = dci.length > 0;
+  const params: DciParams = { dci, dosage, forme, lab };
 
-  useEffect(() => {
-    if (!dci) { setPrice(null); return; }
-    let alive = true;
-    setLoading(true); setError(null);
-    const dosage = useDosage && parsed?.dosage?.length ? parsed.dosage.join(",") : undefined;
-    const forme = useForme && parsed?.forme?.length ? parsed.forme.join(",") : undefined;
-    api.pricing(dci, dosage, forme)
-      .then((d) => alive && setPrice(d))
-      .catch((e) => alive && setError(e.message))
-      .finally(() => alive && setLoading(false));
-    return () => { alive = false; };
-  }, [dci, useDosage, useForme, parsed]);
+  const facets = useAsync(() => (has ? api.dciFacets(params) : Promise.resolve(null)), [dci, dosage, forme, lab]);
+  const price = useAsync(() => (has ? api.pricing(params) : Promise.resolve(null)), [dci, dosage, forme, lab]);
+
+  const f = facets.data;
+  const p = price.data;
 
   const villeCols: Column[] = [
     { key: "BRAND", label: "Produit", className: "font-medium text-ink" },
@@ -79,51 +58,29 @@ export default function PricingPage() {
 
   return (
     <div>
-      <Hero badge="💰 Pricing Intelligence" title="Prix par molécule"
-        subtitle="Tape une molécule (avec dosage et forme si tu veux) : l'outil reconnaît la DCI, le dosage et la forme, puis te donne le prix marché ville (IQVIA) et hospitalier (PCH)." />
+      <Hero
+        badge="💰 Pricing Intelligence"
+        title="Prix par molécule"
+        subtitle="Cherche une molécule, affine par dosage / forme / laboratoire, et obtiens le prix marché ville (IQVIA, prix/boîte) et hospitalier (PCH, prix/unité)."
+      />
 
       <Card>
-        <input className="input text-base" placeholder="ex : amoxicilline 500 mg comprimé   ·   paracetamol 1 g   ·   insuline glargine"
-          value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
-
-        {!query.trim() && <p className="mt-4 text-sm text-slate-500">👆 Tape une molécule pour obtenir son prix.</p>}
-
-        {parsed && parsed.dci_candidates.length === 0 && (
-          <p className="mt-4 text-sm text-amber-600">Aucune DCI reconnue. Essaie une autre orthographe.</p>
-        )}
-
-        {parsed && parsed.dci_candidates.length > 0 && (
-          <div className="mt-4 space-y-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge tone="accent">🧬 DCI : {dci || parsed.dci_candidates[0]}</Badge>
-              {parsed.dosage?.length > 0 && <Badge>💊 {parsed.dosage.join(", ")}</Badge>}
-              {parsed.forme?.length > 0 && <Badge>🧪 {parsed.forme.join(", ")}</Badge>}
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <label className="block">
-                <span className="mb-1 block text-xs font-medium text-slate-500">DCI</span>
-                <select className="input" value={dci} onChange={(e) => setDci(e.target.value)}>
-                  {parsed.dci_candidates.map((d) => <option key={d} value={d}>{d}</option>)}
-                </select>
-              </label>
-              <label className="flex items-end gap-2 pb-2.5 text-sm text-slate-600">
-                <input type="checkbox" className="h-4 w-4 accent-teal-600" checked={useDosage} disabled={!parsed.dosage?.length} onChange={(e) => setUseDosage(e.target.checked)} />
-                Filtrer le dosage
-              </label>
-              <label className="flex items-end gap-2 pb-2.5 text-sm text-slate-600">
-                <input type="checkbox" className="h-4 w-4 accent-teal-600" checked={useForme} disabled={!parsed.forme?.length} onChange={(e) => setUseForme(e.target.checked)} />
-                Filtrer la forme
-              </label>
-            </div>
+        <DciSearch selected={dci} onChange={setDci} />
+        {has && (
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <MultiSelect label="Dosage" options={f?.dosage ?? []} selected={dosage} onChange={setDosage} />
+            <MultiSelect label="Forme" options={f?.forme ?? []} selected={forme} onChange={setForme} />
+            <MultiSelect label="Laboratoire" options={f?.lab ?? []} selected={lab} onChange={setLab} />
           </div>
         )}
       </Card>
 
-      {error && <div className="mt-5"><ErrorState message={error} /></div>}
-      {loading && <div className="mt-5"><Spinner label="Calcul des prix…" /></div>}
+      {!has && <div className="mt-6"><EmptyState message="👆 Cherche une molécule pour obtenir son prix." /></div>}
+      {has && price.loading && <div className="mt-6"><Spinner label="Calcul des prix…" /></div>}
+      {has && price.error && <div className="mt-6"><ErrorState message={price.error} /></div>}
 
-      {price && !loading && (
-        <div className="mt-5">
+      {has && p && !price.loading && (
+        <div className="mt-6">
           <div className="mb-4 flex flex-wrap gap-2">
             <button onClick={() => setTab("ville")} className={`rounded-xl px-4 py-2 text-sm font-medium transition ${tab === "ville" ? "bg-ink text-white" : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"}`}>🏙️ Prix marché ville (IQVIA)</button>
             <button onClick={() => setTab("hosp")} className={`rounded-xl px-4 py-2 text-sm font-medium transition ${tab === "hosp" ? "bg-ink text-white" : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"}`}>🏥 Prix hospitalier (PCH)</button>
@@ -131,13 +88,13 @@ export default function PricingPage() {
           <Card>
             {tab === "ville" ? (
               <>
-                <PriceStats stats={price.ville} unit="prix / boîte" />
-                <div className="mt-5"><Section title="Prix par produit" /><DataTable columns={villeCols} rows={price.ville_rows} maxHeight={380} /></div>
+                <PriceStats stats={p.ville} unit="prix / boîte" />
+                <div className="mt-5"><Section title="Prix par produit" /><DataTable columns={villeCols} rows={p.ville_rows} maxHeight={400} /></div>
               </>
             ) : (
               <>
-                <PriceStats stats={price.hospital} unit="prix / unité" />
-                <div className="mt-5"><Section title="Réceptions hospitalières" /><DataTable columns={hospCols} rows={price.hospital_rows} maxHeight={380} /></div>
+                <PriceStats stats={p.hospital} unit="prix / unité" />
+                <div className="mt-5"><Section title="Réceptions hospitalières" /><DataTable columns={hospCols} rows={p.hospital_rows} maxHeight={400} /></div>
               </>
             )}
           </Card>
