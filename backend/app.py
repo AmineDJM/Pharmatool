@@ -109,7 +109,58 @@ class _State:
     data: dict = {}
     recs: pd.DataFrame = pd.DataFrame()
     dci_dates: pd.DataFrame = pd.DataFrame()
+    iqvia_prefix: dict = {}
     ready: bool = False
+
+
+def _build_iqvia_index():
+    """token-prefix -> row positions, so DCI matching scans a handful of plausible
+    rows instead of all ~16k IQVIA rows (the only slow source)."""
+    iq = S.data.get("iqvia")
+    idx: dict = {}
+    if iq is None or iq.empty or "MOLECULE_NORM" not in iq.columns:
+        return idx
+    for pos, m in enumerate(iq["MOLECULE_NORM"].fillna("").astype(str).tolist()):
+        seen = set()
+        for tok in set(t for t in me.tokens(m) if len(t) >= 3):
+            p = tok[:4]
+            if p not in seen:
+                idx.setdefault(p, []).append(pos)
+                seen.add(p)
+    return idx
+
+
+def _iqvia_match_df(dci_list):
+    """Fast equivalent of market_engine.filter_iqvia (DCI match only): identical
+    scoring/threshold logic, but applied to index-narrowed candidates."""
+    iq = S.data.get("iqvia")
+    if iq is None or iq.empty:
+        return pd.DataFrame()
+    idx = S.iqvia_prefix
+    frames = []
+    for dci in dci_list:
+        q = me.norm_text(dci)
+        qtokens = [t for t in me.tokens(q) if len(t) >= 3]
+        if not qtokens:
+            continue
+        cand = set()
+        for tok in qtokens:
+            cand.update(idx.get(tok[:4], ()))
+        if not cand:
+            continue
+        sub = iq.iloc[sorted(cand)].copy()
+        sub["_QUERY_DCI"] = dci
+        exact_mask = me._contains_all_query_tokens_series(sub["MOLECULE_NORM"], dci)
+        if exact_mask.any():
+            sub = sub[exact_mask].copy()
+            sub["_DCI_SCORE"] = sub["MOLECULE_NORM"].map(lambda s: me.dci_match_score(dci, s)).replace(0, 99)
+        else:
+            sub["_DCI_SCORE"] = sub["MOLECULE_NORM"].map(lambda s: me.dci_match_score(dci, s))
+            sub = sub[sub["_DCI_SCORE"] >= max(me.CONFIG["FUZZY_DCI_THRESHOLD"], 90)]
+        frames.append(sub)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
 
 
 S = _State()
@@ -157,6 +208,7 @@ def _boot():
     t0 = time.time()
     S.data = load_prepared_data()
     nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
+    S.iqvia_prefix = _build_iqvia_index()
     S.recs, cached = _load_recommendations(nom, iqvia, pch)
     S.dci_dates = nomenclature_dci_dates(nom, active_only=True)
     S.ready = True
@@ -470,23 +522,54 @@ def _clean_list(xs: List[str]) -> List[str]:
     return [x.strip() for x in (xs or []) if str(x).strip()]
 
 
-# The DCI fuzzy matching is the heavy part (~600ms) and depends only on the DCI(s)
-# and chosen markets — not on the dosage/forme/lab filters. We memoize it so that
-# tweaking a filter only re-runs the cheap apply_filters / facet_filter step.
-@lru_cache(maxsize=64)
-def _universe(dci_t: tuple, markets_t: tuple):
-    return build_option_universe(", ".join(dci_t), list(markets_t),
-                                 S.data["nom"], S.data["iqvia"], S.data["pch"])
-
-
-@lru_cache(maxsize=64)
+# The DCI matching is the heavy part and depends only on the DCI(s) and markets —
+# not on the dosage/forme/lab filters. We memoize it (so tweaking a filter only
+# re-runs the cheap apply_filters step) AND use the IQVIA prefix index so the
+# matching itself is ~60x faster than scanning all rows.
+@lru_cache(maxsize=128)
 def _matched(dci_t: tuple, markets_t: tuple):
-    nom, iqvia, pch = S.data["nom"], S.data["iqvia"], S.data["pch"]
+    nom, pch = S.data["nom"], S.data["pch"]
     dci_list, mk = list(dci_t), list(markets_t)
     nom_b = filter_nomenclature(nom, dci_list)
-    iq_b = filter_iqvia(iqvia, dci_list) if SRC_IQVIA in mk else pd.DataFrame()
+    iq_b = _iqvia_match_df(dci_list) if SRC_IQVIA in mk else pd.DataFrame()
     pch_b = filter_pch(pch, dci_list) if SRC_PCH in mk else pd.DataFrame()
     return nom_b, iq_b, pch_b
+
+
+def _universe_from_frames(nom_b, iq_b, pch_b):
+    """Build the facet 'universe' from already-matched frames — mirrors
+    market_engine.build_option_universe but without re-running the matching."""
+    frames = []
+    if nom_b is not None and not nom_b.empty:
+        frames.append(pd.DataFrame({
+            "source": "NOMENCLATURE", "dci": nom_b["_QUERY_DCI"].astype(str),
+            "dosage": nom_b["DOSAGE"].fillna("").astype(str), "forme": nom_b["FORME_NORM"].fillna("").astype(str),
+            "lab": nom_b["LABORATOIRE"].fillna("").astype(str), "statut": nom_b["STATUT"].fillna("").astype(str),
+            "market": "NOMENCLATURE", "label": nom_b["PRODUCT_FULL"].fillna("").astype(str)}))
+    if iq_b is not None and not iq_b.empty:
+        frames.append(pd.DataFrame({
+            "source": SRC_IQVIA, "dci": iq_b["_QUERY_DCI"].astype(str),
+            "dosage": iq_b["PRESENTATION"].fillna("").astype(str), "forme": iq_b["FORME_NORM"].fillna("").astype(str),
+            "lab": iq_b["LABORATOIRE"].fillna("").astype(str), "statut": "",
+            "market": SRC_IQVIA, "label": iq_b["PRODUCT_FULL"].fillna("").astype(str)}))
+    if pch_b is not None and not pch_b.empty:
+        frames.append(pd.DataFrame({
+            "source": SRC_PCH, "dci": pch_b["_QUERY_DCI"].astype(str),
+            "dosage": pch_b["PRODUCT_FULL"].fillna("").astype(str), "forme": pch_b["FORME_NORM"].fillna("").astype(str),
+            "lab": pch_b["LABORATOIRE"].fillna("").astype(str), "statut": "",
+            "market": SRC_PCH, "label": pch_b["PRODUCT_FULL"].fillna("").astype(str)}))
+    if not frames:
+        return pd.DataFrame(columns=["source", "dci", "dosage", "forme", "lab", "statut", "market", "label"])
+    u = pd.concat(frames, ignore_index=True, sort=False).fillna("")
+    for c in ["dosage", "forme", "lab", "statut", "market"]:
+        u[c + "_NORM"] = u[c].map(me.norm_text)
+    return u.drop_duplicates()
+
+
+@lru_cache(maxsize=128)
+def _universe(dci_t: tuple, markets_t: tuple):
+    nom_b, iq_b, pch_b = _matched(dci_t, markets_t)
+    return _universe_from_frames(nom_b, iq_b, pch_b)
 
 
 @app.get("/api/dci/options")
@@ -554,10 +637,17 @@ def pricing_suggest(q: str = Query(..., min_length=1)):
     }
 
 
-def _stats(s):
-    if not s:
-        return None
-    return {k: _clean(s.get(k)) for k in ("n", "avg_dzd", "avg_usd", "median", "min", "max")}
+def _price_stats(prices, avg):
+    s = pd.to_numeric(pd.Series(prices), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    has_avg = isinstance(avg, (int, float)) and avg == avg
+    return {
+        "n": int(len(s)),
+        "avg_dzd": _clean(avg) if has_avg else None,
+        "avg_usd": _clean(avg / CONFIG["DZD_PER_USD"]) if has_avg else None,
+        "median": _clean(float(s.median())) if len(s) else None,
+        "min": _clean(float(s.min())) if len(s) else None,
+        "max": _clean(float(s.max())) if len(s) else None,
+    }
 
 
 @app.get("/api/pricing")
@@ -566,22 +656,47 @@ def pricing(dci: List[str] = Query(default=[]),
             forme: List[str] = Query(default=[]),
             lab: List[str] = Query(default=[]),
             markets: List[str] = Query(default=[])):
-    iqvia, pch, nom = S.data["iqvia"], S.data["pch"], S.data["nom"]
     dci_list = _clean_list(dci)
     if not dci_list:
         raise HTTPException(status_code=400, detail="dci_required")
     mk = _markets(markets)
-    res = price_for_dci(iqvia, pch, nom, dci_list,
-                        _clean_list(dosage) or None, _clean_list(forme) or None,
-                        _clean_list(lab) or None, mk)
+    dosage_l = _clean_list(dosage) or None
+    forme_l = _clean_list(forme) or None
+    lab_l = _clean_list(lab) or None
+    nom_b, iq_b, pch_b = _matched(tuple(sorted(dci_list)), tuple(sorted(mk)))
+
+    ville = None
+    ville_rows = pd.DataFrame()
+    if iq_b is not None and not iq_b.empty:
+        iq = me.apply_filters(iq_b, dosage_l, forme_l, lab_l, None, "iqvia")
+        if not iq.empty:
+            if "PROD_KEY" in iq.columns:
+                iq = iq.sort_values("MARKET_VALUE_DZD", ascending=False).drop_duplicates(subset=["_QUERY_DCI", "PROD_KEY"])
+            iq = iq.copy()
+            iq["Prix_boite_DZD"] = np.where(iq["MARKET_VOLUME"] > 0, iq["MARKET_VALUE_DZD"] / iq["MARKET_VOLUME"], np.nan)
+            tv, tvol = iq["MARKET_VALUE_DZD"].sum(), iq["MARKET_VOLUME"].sum()
+            ville = _price_stats(iq["Prix_boite_DZD"], (tv / tvol) if tvol > 0 else float("nan"))
+            ville_rows = iq.sort_values("MARKET_VALUE_DZD", ascending=False)
+
+    hospital = None
+    hospital_rows = pd.DataFrame()
+    if pch_b is not None and not pch_b.empty:
+        ph = me.apply_filters(pch_b, dosage_l, forme_l, lab_l, None, "pch")
+        if not ph.empty:
+            ph = ph.copy()
+            ph["Prix_unitaire_DZD"] = pd.to_numeric(ph["UNIT_PRICE"], errors="coerce")
+            tv, tvol = (ph["Prix_unitaire_DZD"] * ph["QTE"]).sum(), ph["QTE"].sum()
+            hospital = _price_stats(ph["Prix_unitaire_DZD"], (tv / tvol) if tvol > 0 else float("nan"))
+            hospital_rows = ph.sort_values("MARKET_VALUE_DZD", ascending=False)
+
     ville_cols = ["BRAND", "PRESENTATION", "LABORATOIRE", "MARKET_VOLUME", "MARKET_VALUE_DZD", "Prix_boite_DZD", "GROWTH_PY"]
     hosp_cols = ["PRODUCT_FULL", "LABORATOIRE", "QTE", "Prix_unitaire_DZD", "MARKET_VALUE_DZD", "DEVISE", "DATESTOCKAGE"]
     return {
         "dci": dci_list,
-        "ville": _stats(res.get("ville")),
-        "ville_rows": records(res.get("ville_rows"), ville_cols),
-        "hospital": _stats(res.get("hospital")),
-        "hospital_rows": records(res.get("hospital_rows"), hosp_cols),
+        "ville": ville,
+        "ville_rows": records(ville_rows, ville_cols),
+        "hospital": hospital,
+        "hospital_rows": records(hospital_rows, hosp_cols),
     }
 
 
