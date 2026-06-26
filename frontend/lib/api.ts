@@ -7,8 +7,36 @@ export const API_BASE =
 
 export type Row = Record<string, any>;
 
+/* ---------- Shared-password auth ---------- */
+const PW_KEY = "pt_pw";
+
+export function getPw(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(PW_KEY) || "";
+}
+export function setPw(pw: string) {
+  if (typeof window !== "undefined") localStorage.setItem(PW_KEY, pw);
+}
+export function clearPw() {
+  if (typeof window !== "undefined") localStorage.removeItem(PW_KEY);
+}
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra || {}) };
+  const pw = getPw();
+  if (pw) h["x-app-password"] = pw;
+  return h;
+}
+function onUnauthorized() {
+  clearPw();
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("pt-unauth"));
+}
+
 async function getJSON<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", headers: authHeaders() });
+  if (res.status === 401) {
+    onUnauthorized();
+    throw new Error("Session expirée — reconnecte-toi.");
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`API ${res.status} sur ${path}${text ? ` — ${text}` : ""}`);
@@ -19,10 +47,20 @@ async function getJSON<T = any>(path: string): Promise<T> {
 async function postJSON<T = any>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     cache: "no-store",
   });
+  if (res.status === 401) {
+    if (!path.includes("/login")) onUnauthorized();
+    let d = "";
+    try {
+      d = (await res.json())?.detail ?? "";
+    } catch {
+      /* ignore */
+    }
+    throw new Error(d || "unauthorized");
+  }
   if (!res.ok) {
     let detail = "";
     try {
@@ -72,4 +110,5 @@ export const api = {
   dciAnalysis: (p: DciParams) => getJSON(`/api/dci/analysis?${buildQuery({ ...p })}`),
   pricing: (p: DciParams) => getJSON(`/api/pricing?${buildQuery({ ...p })}`),
   assistant: (question: string) => postJSON("/api/assistant", { question }),
+  login: (password: string) => postJSON("/api/login", { password }),
 };

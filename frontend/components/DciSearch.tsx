@@ -37,6 +37,7 @@ export function DciSearch({ selected, onChange }: { selected: string[]; onChange
     <div className="relative" ref={ref}>
       <input
         className="input text-base"
+        autoFocus
         placeholder="Chercher une molécule (DCI) — ex : amoxicilline, dolutégravir, paracétamol"
         value={q}
         onFocus={() => setOpen(true)}

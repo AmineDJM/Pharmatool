@@ -28,7 +28,7 @@ for _p in (str(ROOT), str(HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -164,7 +164,21 @@ def _boot():
           f"({len(S.recs)} DCI scored · recommandations {'lues du cache' if cached else 'recalculées'})")
 
 
-app = FastAPI(title="Pharmatool API", version="1.0.0")
+# Simple shared-password gate. Override in production via the APP_PASSWORD env var
+# (Render dashboard); falls back to the owner's code so it works out of the box.
+APP_PASSWORD = os.getenv("APP_PASSWORD") or "24011971"
+_OPEN_PATHS = {"/api/health", "/api/login"}
+
+
+def require_auth(request: Request, x_app_password: Optional[str] = Header(default=None)):
+    """Reject any /api call that doesn't carry the shared password header."""
+    if not APP_PASSWORD or request.url.path in _OPEN_PATHS:
+        return
+    if x_app_password != APP_PASSWORD:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+app = FastAPI(title="Pharmatool API", version="1.0.0", dependencies=[Depends(require_auth)])
 
 app.add_middleware(
     CORSMiddleware,
@@ -172,6 +186,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class LoginBody(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+def login(body: LoginBody):
+    if not APP_PASSWORD or body.password == APP_PASSWORD:
+        return {"ok": True}
+    raise HTTPException(status_code=401, detail="bad_password")
 
 
 @app.on_event("startup")

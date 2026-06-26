@@ -19,6 +19,9 @@ services:
       # Clé Anthropic pour l'Assistant IA — à coller dans le dashboard Render.
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Mot de passe d'accès à l'app. Par défaut "24011971" (dans le code).
+      # Pour le changer : ajoute ici une variable APP_PASSWORD avec ta valeur,
+      # ou crée-la dans le dashboard Render (onglet Environment).
 
   # ---------- Frontend : Next.js ----------
   - type: web
