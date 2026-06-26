@@ -209,34 +209,83 @@ def meta():
 def _overview_payload():
     iqvia = S.data["iqvia"]
     iqvia_lab_raw = S.data["iqvia_lab_raw"]
-    total = iqvia_total_market(iqvia_lab_raw, iqvia)
+    pch = S.data.get("pch", pd.DataFrame())
+    total = iqvia_total_market(iqvia_lab_raw, iqvia)  # marché ville (IQVIA)
     classes = iqvia_class_breakdown(iqvia)
     labs = S.data.get("lab_landscape", pd.DataFrame())
 
     market_hhi = compute_hhi(labs["Market_Share"]) if not labs.empty and "Market_Share" in labs.columns else float("nan")
 
+    # Momentum sur le marché de ville (seul IQVIA porte la croissance N-1)
     material = classes[classes["Share"] >= 0.003].copy() if not classes.empty else pd.DataFrame()
     if not material.empty:
         material = material[material["Growth_PY"].notna()]
     growers = material.sort_values("Growth_PY", ascending=False).head(12) if not material.empty else pd.DataFrame()
     decliners = material.sort_values("Growth_PY", ascending=True).head(12) if not material.empty else pd.DataFrame()
 
+    # Marché hospitalier (PCH) — taxonomie de classes et noms de labos différents
+    # d'IQVIA : reporté comme un canal distinct plutôt que fusionné (fusion = faux).
+    pch_val = pch_vol = 0.0
+    pch_labs_n = 0
+    pch_classes = pd.DataFrame()
+    pch_labs = pd.DataFrame()
+    if pch is not None and not pch.empty:
+        pch_val = num(pd.to_numeric(pch["MARKET_VALUE_DZD"], errors="coerce").sum())
+        pch_vol = num(pd.to_numeric(pch["MARKET_VOLUME"], errors="coerce").sum())
+        pch_labs_n = int(pch["LABORATOIRE"].replace("", np.nan).dropna().nunique())
+        pc = pch.groupby("THERAPEUTIC_CLASS", dropna=False).agg(
+            Value_DZD=("MARKET_VALUE_DZD", "sum"), Volume=("MARKET_VOLUME", "sum"),
+            Players=("LABORATOIRE", "nunique"),
+        ).reset_index()
+        pc["Value_USD"] = pc["Value_DZD"] / CONFIG["DZD_PER_USD"]
+        tot_pc = pc["Value_DZD"].sum()
+        pc["Share"] = np.where(tot_pc > 0, pc["Value_DZD"] / tot_pc, np.nan)
+        pch_classes = pc.sort_values("Value_DZD", ascending=False)
+        pl = pch.groupby("LABORATOIRE", dropna=False).agg(
+            Value_DZD=("MARKET_VALUE_DZD", "sum"), Volume=("MARKET_VOLUME", "sum"),
+            Products=("PRODUCT_FULL", "nunique"),
+        ).reset_index()
+        pl = pl[pl["LABORATOIRE"].astype(str).str.strip().ne("")]
+        pl["Value_USD"] = pl["Value_DZD"] / CONFIG["DZD_PER_USD"]
+        tot_pl = pl["Value_DZD"].sum()
+        pl["Market_Share"] = np.where(tot_pl > 0, pl["Value_DZD"] / tot_pl, np.nan)
+        pch_labs = pl.sort_values("Value_DZD", ascending=False)
+
+    ville_val = num(total.get("value_dzd"))
+    ville_vol = num(total.get("volume"))
+    total_dzd = ville_val + pch_val
+    total_vol = ville_vol + pch_vol
+    dzd = CONFIG["DZD_PER_USD"]
+
     class_cols = ["THERAPEUTIC_CLASS", "Value_DZD", "Value_USD", "Share", "Growth_PY", "Players", "Products", "Volume"]
+    pch_class_cols = ["THERAPEUTIC_CLASS", "Value_DZD", "Value_USD", "Share", "Players", "Volume"]
     lab_cols = ["Rank", "LABORATOIRE", "Value_DZD", "Value_USD", "Market_Share", "Growth_PY"]
+    pch_lab_cols = ["LABORATOIRE", "Value_DZD", "Value_USD", "Market_Share", "Volume", "Products"]
     mom_cols = ["THERAPEUTIC_CLASS", "Growth_PY", "Share"]
 
     return {
         "kpis": {
-            "value_dzd": num(total.get("value_dzd")),
-            "value_usd": num(total.get("value_usd")),
+            "value_dzd": total_dzd,
+            "value_usd": total_dzd / dzd,
+            "ville_dzd": ville_val,
+            "ville_usd": ville_val / dzd,
+            "hosp_dzd": pch_val,
+            "hosp_usd": pch_val / dzd,
+            "ville_share": (ville_val / total_dzd) if total_dzd else None,
+            "hosp_share": (pch_val / total_dzd) if total_dzd else None,
             "growth_py": _clean(total.get("growth_py")),
-            "volume": num(total.get("volume")),
-            "n_labs": int(num(total.get("n_labs"))),
+            "volume": total_vol,
+            "volume_ville": ville_vol,
+            "volume_hosp": pch_vol,
+            "n_labs_ville": int(num(total.get("n_labs"))),
+            "n_labs_hosp": pch_labs_n,
             "hhi": _clean(market_hhi),
             "hhi_label": hhi_label(market_hhi),
         },
         "classes": records(classes.head(40), class_cols),
+        "pch_classes": records(pch_classes.head(20), pch_class_cols),
         "labs": records(labs.head(40), lab_cols),
+        "pch_labs": records(pch_labs.head(20), pch_lab_cols),
         "growers": records(growers, mom_cols),
         "decliners": records(decliners, mom_cols),
     }
